@@ -38,6 +38,23 @@ fn require_https(url: &Url, what: &str) -> Result<(), anyhow::Error> {
     Err(anyhow!("Refusing non-HTTPS {what} URL: {url}"))
 }
 
+/// Client whose redirects are followed only while every hop stays HTTPS (5 hops at most),
+/// so an https URL cannot be downgraded to http by a redirect.
+fn https_only_client() -> Result<reqwest::blocking::Client, anyhow::Error> {
+    let policy = reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 5 {
+            return attempt.error("Too many redirects");
+        }
+        match require_https(attempt.url(), "redirect") {
+            Ok(()) => attempt.follow(),
+            Err(error) => attempt.error(error.to_string()),
+        }
+    });
+    Ok(reqwest::blocking::Client::builder()
+        .redirect(policy)
+        .build()?)
+}
+
 fn file_sha256(path: &std::path::Path) -> std::io::Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut sha256 = Sha256::new();
@@ -115,11 +132,18 @@ impl Updater {
         println!("Fetching updates for v{}", self.current_version);
         println!("Using updater endpoint {}", self.endpoint);
         require_https(&self.endpoint, "updater endpoint")?;
-        let update_response =
-            reqwest::blocking::get(self.endpoint.clone())?.json::<UpdateResponse>()?;
+        let client = https_only_client()?;
+        let update_response = client
+            .get(self.endpoint.clone())
+            .send()?
+            .error_for_status()?
+            .json::<UpdateResponse>()?;
         require_https(&update_response.version_desc, "update descriptor")?;
-        let update_descriptor =
-            reqwest::blocking::get(update_response.version_desc)?.json::<Descriptor>()?;
+        let update_descriptor = client
+            .get(update_response.version_desc)
+            .send()?
+            .error_for_status()?
+            .json::<Descriptor>()?;
 
         if update_response.version != update_descriptor.version {
             return Err(anyhow!("Mismatched update versions"));
@@ -162,7 +186,10 @@ impl Updater {
 
         std::thread::sleep(self.settle_delay);
         // Download the new setup file
-        let mut installer_response = reqwest::blocking::get(installer.url.clone())?;
+        let mut installer_response = client
+            .get(installer.url.clone())
+            .send()?
+            .error_for_status()?;
         let size = installer_response.content_length();
         let mut downloaded: u64 = 0;
         let mut sha256 = Sha256::new();
@@ -206,7 +233,10 @@ impl Updater {
             }
             return Err(anyhow::anyhow!("Checksum verification failed"));
         }
-        std::fs::rename(&partial, &dest)?;
+        if let Err(error) = std::fs::rename(&partial, &dest) {
+            std::fs::remove_file(&partial).ok();
+            return Err(error.into());
+        }
         println!("Checksum verified.");
 
         let update = Some(Update {
@@ -254,6 +284,12 @@ mod tests {
                 BufReader::new(stream.try_clone().unwrap())
                     .read_line(&mut request_line)
                     .ok();
+                if request_line.contains("/redirect.json") {
+                    stream
+                        .write_all(b"HTTP/1.1 302 Found\r\nLocation: http://example.invalid/latest.json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .ok();
+                    continue;
+                }
                 let (status, content_type, body) = if request_line.contains("/latest.json") {
                     ("200 OK", "application/json", feed.clone().into_bytes())
                 } else if request_line.contains("/Laststream.exe") {
@@ -424,6 +460,17 @@ mod tests {
             INSTALLER
         );
         assert_eq!(hits.load(Ordering::SeqCst), 3);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn redirect_to_plain_http_is_refused() {
+        let (base, hits) = serve("1.0.18", &sha256_hex(INSTALLER));
+        let endpoint = base.join("/redirect.json").unwrap();
+        let (updater, dir) = updater_for(&endpoint, "1.0.17", "redirect");
+        let error = updater.autoupdate().unwrap_err();
+        assert!(format!("{:?}", error).contains("non-HTTPS"), "{:?}", error);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "only the redirect was hit");
         std::fs::remove_dir_all(dir).ok();
     }
 
