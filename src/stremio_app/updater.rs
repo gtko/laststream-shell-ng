@@ -102,6 +102,21 @@ impl Update {
     }
 }
 
+/// Takes the update waiting in `slot` and returns the installer path to run, only if it still
+/// passes `verify_before_run`. On refusal the slot is emptied and `None` is returned: the caller
+/// just skips the launch (it must not leave its own loop).
+pub fn verified_installer_to_run(slot: &std::sync::Mutex<Option<Update>>) -> Option<PathBuf> {
+    let update = slot.lock().unwrap().clone()?;
+    match update.verify_before_run() {
+        Ok(path) => Some(path.to_path_buf()),
+        Err(error) => {
+            eprintln!("Updater refused: {error}");
+            *slot.lock().unwrap() = None;
+            None
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Updater {
     pub current_version: Version,
@@ -522,6 +537,41 @@ mod tests {
         let update = updater.autoupdate().unwrap().expect("update expected");
         std::fs::remove_file(&update.file).unwrap();
         assert!(update.verify_before_run().is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn refusal_empties_the_slot_and_returns_none() {
+        let (endpoint, _) = serve("1.0.18", &sha256_hex(INSTALLER));
+        let (updater, dir) = updater_for(&endpoint, "1.0.17", "slot");
+        let update = updater.autoupdate().unwrap().expect("update expected");
+        let slot = std::sync::Mutex::new(Some(update.clone()));
+        assert_eq!(verified_installer_to_run(&slot), Some(update.file.clone()));
+        assert!(slot.lock().unwrap().is_some());
+        std::fs::write(&update.file, b"malicious replacement").unwrap();
+        assert_eq!(verified_installer_to_run(&slot), None);
+        assert!(slot.lock().unwrap().is_none());
+        assert_eq!(verified_installer_to_run(&slot), None, "empty slot");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn directory_in_place_of_the_installer_is_refused() {
+        let (endpoint, _) = serve("1.0.18", &sha256_hex(INSTALLER));
+        let (updater, dir) = updater_for(&endpoint, "1.0.17", "dir-swap");
+        let update = updater.autoupdate().unwrap().expect("update expected");
+        std::fs::remove_file(&update.file).unwrap();
+        std::fs::create_dir(&update.file).unwrap();
+        assert!(update.verify_before_run().is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn uppercase_descriptor_checksum_still_verifies_before_run() {
+        let (endpoint, _) = serve("1.0.18", &sha256_hex(INSTALLER).to_uppercase());
+        let (updater, dir) = updater_for(&endpoint, "1.0.17", "upper-run");
+        let update = updater.autoupdate().unwrap().expect("update expected");
+        assert!(update.verify_before_run().is_ok());
         std::fs::remove_dir_all(dir).ok();
     }
 

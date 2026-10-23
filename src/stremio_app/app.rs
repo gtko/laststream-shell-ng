@@ -611,20 +611,10 @@ impl MainWindow {
                     Some("autoupdater-notif-clicked") => {
                         // We've shown the "Update Available" notification
                         // and the user clicked on "Restart And Update"
-                        let autoupdater_setup_file =
-                            autoupdater_setup_mutex.lock().unwrap().clone();
-                        match autoupdater_setup_file {
-                            Some(update) => {
-                                // The installer may have waited hours in a user-writable folder:
-                                // re-check its SHA-256 right before running it (ODY-263).
-                                let file_path = match update.verify_before_run() {
-                                    Ok(file_path) => file_path.to_path_buf(),
-                                    Err(err) => {
-                                        eprintln!("Updater refused: {err}");
-                                        *autoupdater_setup_mutex.lock().unwrap() = None;
-                                        return;
-                                    }
-                                };
+                        // The installer may have waited hours in a user-writable folder:
+                        // re-check its SHA-256 right before running it (ODY-263).
+                        match updater::verified_installer_to_run(&autoupdater_setup_mutex) {
+                            Some(file_path) => {
                                 println!("Running the setup at {file_path:?}");
 
                                 let command = Command::new(file_path)
