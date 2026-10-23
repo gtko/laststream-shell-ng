@@ -22,6 +22,36 @@ pub fn resolve_endpoint(explicit: Option<Url>, disabled: bool) -> Option<Url> {
     }))
 }
 
+/// File name of the downloaded installer, fixed so a stale one is overwritten, never accumulated.
+const INSTALLER_FILE_NAME: &str = "Laststream-update.exe";
+
+/// Only `https` is accepted: the SHA-256 comes from the descriptor, so a plain-http descriptor
+/// would let a network attacker serve both the installer and its hash. Tests may use 127.0.0.1.
+fn require_https(url: &Url, what: &str) -> Result<(), anyhow::Error> {
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    #[cfg(test)]
+    if url.scheme() == "http" && url.host_str() == Some("127.0.0.1") {
+        return Ok(());
+    }
+    Err(anyhow!("Refusing non-HTTPS {what} URL: {url}"))
+}
+
+fn file_sha256(path: &std::path::Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut sha256 = Sha256::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let size = file.read(&mut chunk)?;
+        if size == 0 {
+            break;
+        }
+        sha256.update(&chunk[..size]);
+    }
+    Ok(format!("{:x}", sha256.finalize()))
+}
+
 #[derive(Debug, Clone)]
 pub struct Update {
     /// The new version that we update to
@@ -73,7 +103,7 @@ impl Updater {
             current_version,
             endpoint: updater_endpoint.clone(),
             force_update,
-            download_dir: std::env::temp_dir(),
+            download_dir: std::env::temp_dir().join("laststream-update"),
             settle_delay: std::time::Duration::from_secs(2),
             ready_version: None,
         }
@@ -84,8 +114,10 @@ impl Updater {
         // Check for updates
         println!("Fetching updates for v{}", self.current_version);
         println!("Using updater endpoint {}", self.endpoint);
+        require_https(&self.endpoint, "updater endpoint")?;
         let update_response =
             reqwest::blocking::get(self.endpoint.clone())?.json::<UpdateResponse>()?;
+        require_https(&update_response.version_desc, "update descriptor")?;
         let update_descriptor =
             reqwest::blocking::get(update_response.version_desc)?.json::<Descriptor>()?;
 
@@ -106,16 +138,23 @@ impl Updater {
         }
         println!("Found update v{version}");
 
-        let file_name = std::path::Path::new(installer.url.path())
-            .file_name()
-            .context("Invalid file name")?
-            .to_str()
-            .context("The path is not valid UTF-8")?
-            .to_string();
-        let dest = self.download_dir.join(file_name);
-        if self.ready_version.as_ref() == Some(&version) && dest.is_file() {
+        require_https(&installer.url, "installer")?;
+        std::fs::create_dir_all(&self.download_dir)?;
+        let dest = self.download_dir.join(INSTALLER_FILE_NAME);
+        // An installer already on disk is reused only if its hash still matches the descriptor.
+        if dest.is_file()
+            && file_sha256(&dest)
+                .map(|hash| hash.eq_ignore_ascii_case(installer.checksum.trim()))
+                .unwrap_or(false)
+        {
             println!("Update v{version} is already downloaded and verified");
-            return Ok(None);
+            if self.ready_version.as_ref() == Some(&version) {
+                return Ok(None);
+            }
+            return Ok(Some(Update {
+                version,
+                file: dest,
+            }));
         }
         // Downloaded aside and renamed once verified, so `dest` is never a partial or unverified file
         // (a previously verified installer may still be waiting to be run from it).
@@ -133,12 +172,23 @@ impl Updater {
         let mut chunk = [0u8; 8192];
         let mut file = std::fs::File::create(&partial)?;
         loop {
-            let chunk_size = installer_response.read(&mut chunk)?;
+            let chunk_size = match installer_response.read(&mut chunk) {
+                Ok(size) => size,
+                Err(error) => {
+                    drop(file);
+                    std::fs::remove_file(&partial).ok();
+                    return Err(error.into());
+                }
+            };
             if chunk_size == 0 {
                 break;
             }
             sha256.update(&chunk[..chunk_size]);
-            file.write_all(&chunk[..chunk_size])?;
+            if let Err(error) = file.write_all(&chunk[..chunk_size]) {
+                drop(file);
+                std::fs::remove_file(&partial).ok();
+                return Err(error.into());
+            }
             if let Some(size) = size {
                 downloaded += chunk_size as u64;
                 print!("\rProgress: {}%", downloaded * 100 / size);
@@ -149,11 +199,13 @@ impl Updater {
         }
         println!();
         let actual_sha256 = format!("{:x}", sha256.finalize());
+        drop(file);
         if !actual_sha256.eq_ignore_ascii_case(installer.checksum.trim()) {
-            std::fs::remove_file(&partial)?;
+            if let Err(error) = std::fs::remove_file(&partial) {
+                println!("Could not remove {}: {error}", partial.display());
+            }
             return Err(anyhow::anyhow!("Checksum verification failed"));
         }
-        drop(file);
         std::fs::rename(&partial, &dest)?;
         println!("Checksum verified.");
 
@@ -256,7 +308,7 @@ mod tests {
         let update = updater.autoupdate().unwrap().expect("update expected");
         assert_eq!(update.version, Version::new(1, 0, 18));
         assert_eq!(std::fs::read(&update.file).unwrap(), INSTALLER);
-        assert_eq!(update.file, dir.join("Laststream.exe"));
+        assert_eq!(update.file, dir.join(INSTALLER_FILE_NAME));
         assert_eq!(
             hits.load(Ordering::SeqCst),
             3,
@@ -279,8 +331,8 @@ mod tests {
         let (updater, dir) = updater_for(&endpoint, "1.0.17", "bad");
         let error = updater.autoupdate().unwrap_err();
         assert!(error.to_string().contains("Checksum"), "{}", error);
-        assert!(!dir.join("Laststream.exe").exists());
-        assert!(!dir.join("Laststream.exe.part").exists());
+        assert!(!dir.join(INSTALLER_FILE_NAME).exists());
+        assert!(!dir.join("Laststream-update.exe.part").exists());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -288,13 +340,13 @@ mod tests {
     fn failed_check_keeps_the_installer_already_waiting() {
         let (endpoint, _) = serve("1.0.19", &sha256_hex(b"something else"));
         let (updater, dir) = updater_for(&endpoint, "1.0.17", "keep");
-        std::fs::write(dir.join("Laststream.exe"), b"verified earlier").unwrap();
+        std::fs::write(dir.join(INSTALLER_FILE_NAME), b"verified earlier").unwrap();
         assert!(updater.autoupdate().is_err());
         assert_eq!(
-            std::fs::read(dir.join("Laststream.exe")).unwrap(),
+            std::fs::read(dir.join(INSTALLER_FILE_NAME)).unwrap(),
             b"verified earlier"
         );
-        assert!(!dir.join("Laststream.exe.part").exists());
+        assert!(!dir.join("Laststream-update.exe.part").exists());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -302,7 +354,7 @@ mod tests {
     fn version_already_downloaded_is_not_fetched_again() {
         let (endpoint, hits) = serve("1.0.18", &sha256_hex(INSTALLER));
         let (mut updater, dir) = updater_for(&endpoint, "1.0.17", "ready");
-        std::fs::write(dir.join("Laststream.exe"), INSTALLER).unwrap();
+        std::fs::write(dir.join(INSTALLER_FILE_NAME), INSTALLER).unwrap();
         updater.ready_version = Some(Version::new(1, 0, 18));
         assert!(updater.autoupdate().unwrap().is_none());
         assert_eq!(hits.load(Ordering::SeqCst), 2, "installer not requested");
@@ -316,9 +368,63 @@ mod tests {
             let (updater, dir) = updater_for(&endpoint, "1.0.17", name);
             assert!(updater.autoupdate().is_err());
             assert_eq!(hits.load(Ordering::SeqCst), 2, "installer not requested");
-            assert!(!dir.join("Laststream.exe").exists());
+            assert!(!dir.join(INSTALLER_FILE_NAME).exists());
             std::fs::remove_dir_all(dir).ok();
         }
+    }
+
+    #[test]
+    fn plain_http_urls_are_rejected() {
+        let local = Url::parse("http://127.0.0.1:1/x").unwrap();
+        assert!(
+            require_https(&local, "t").is_ok(),
+            "loopback allowed in tests"
+        );
+        for bad in [
+            "http://example.com/x",
+            "http://localhost/x",
+            "ftp://example.com/x",
+        ] {
+            let url = Url::parse(bad).unwrap();
+            let error = require_https(&url, "installer").unwrap_err();
+            assert!(error.to_string().contains("non-HTTPS"), "{}", error);
+        }
+        assert!(require_https(&Url::parse("https://example.com/x").unwrap(), "t").is_ok());
+    }
+
+    #[test]
+    fn non_https_endpoint_is_refused_without_any_request() {
+        let endpoint = Url::parse("http://example.invalid/latest.json").unwrap();
+        let (updater, dir) = updater_for(&endpoint, "1.0.17", "http-endpoint");
+        let error = updater.autoupdate().unwrap_err();
+        assert!(error.to_string().contains("non-HTTPS"), "{}", error);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn valid_installer_already_on_disk_is_not_downloaded_again() {
+        let (endpoint, hits) = serve("1.0.18", &sha256_hex(INSTALLER));
+        let (updater, dir) = updater_for(&endpoint, "1.0.17", "on-disk");
+        std::fs::write(dir.join(INSTALLER_FILE_NAME), INSTALLER).unwrap();
+        let update = updater.autoupdate().unwrap().expect("reused installer");
+        assert_eq!(update.file, dir.join(INSTALLER_FILE_NAME));
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "installer not requested");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn corrupt_installer_on_disk_is_downloaded_again() {
+        let (endpoint, hits) = serve("1.0.18", &sha256_hex(INSTALLER));
+        let (mut updater, dir) = updater_for(&endpoint, "1.0.17", "corrupt");
+        std::fs::write(dir.join(INSTALLER_FILE_NAME), b"tampered").unwrap();
+        updater.ready_version = Some(Version::new(1, 0, 18));
+        assert!(updater.autoupdate().unwrap().is_some());
+        assert_eq!(
+            std::fs::read(dir.join(INSTALLER_FILE_NAME)).unwrap(),
+            INSTALLER
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
