@@ -5,7 +5,7 @@ use std::{
     cell::RefCell,
     io::Read,
     os::windows::process::CommandExt,
-    path::{Path, PathBuf},
+    path::Path,
     process::{self, Command},
     str,
     sync::{atomic::Ordering, Arc, Mutex},
@@ -68,7 +68,7 @@ pub struct MainWindow {
     pub start_hidden: bool,
     pub autoupdater_endpoint: Option<Url>,
     pub force_update: bool,
-    pub autoupdater_setup_file: Arc<Mutex<Option<PathBuf>>>,
+    pub autoupdater_setup_file: Arc<Mutex<Option<updater::Update>>>,
     pub requested_fullscreen: Arc<Mutex<Option<bool>>>,
     pub requested_window_op: Arc<Mutex<Option<WindowRequest>>>,
     pub requested_cache_directory: Arc<Mutex<Option<CacheDirectoryRequest>>>,
@@ -321,7 +321,7 @@ impl MainWindow {
                             println!("New version ready to install v{}", update.version);
                             ready_version = Some(update.version.clone());
                             let mut autoupdater_setup_file = autoupdater_setup_file.lock().unwrap();
-                            *autoupdater_setup_file = Some(update.file.clone());
+                            *autoupdater_setup_file = Some(update.clone());
                             web_tx_upd.send(RPCResponse::update_available()).ok();
                         }
                         Ok(None) => println!("No new updates found"),
@@ -614,7 +614,17 @@ impl MainWindow {
                         let autoupdater_setup_file =
                             autoupdater_setup_mutex.lock().unwrap().clone();
                         match autoupdater_setup_file {
-                            Some(file_path) => {
+                            Some(update) => {
+                                // The installer may have waited hours in a user-writable folder:
+                                // re-check its SHA-256 right before running it (ODY-263).
+                                let file_path = match update.verify_before_run() {
+                                    Ok(file_path) => file_path.to_path_buf(),
+                                    Err(err) => {
+                                        eprintln!("Updater refused: {err}");
+                                        *autoupdater_setup_mutex.lock().unwrap() = None;
+                                        return;
+                                    }
+                                };
                                 println!("Running the setup at {file_path:?}");
 
                                 let command = Command::new(file_path)

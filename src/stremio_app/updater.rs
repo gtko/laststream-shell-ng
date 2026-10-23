@@ -74,6 +74,32 @@ pub struct Update {
     /// The new version that we update to
     pub version: Version,
     pub file: PathBuf,
+    /// SHA-256 (hex) the installer must still have when it is run, from the descriptor.
+    pub sha256: String,
+}
+
+impl Update {
+    /// Re-hashes the installer right before it is run: the file sits in a user-writable
+    /// temp folder, possibly for hours after the download check (TOCTOU). On mismatch (or if it
+    /// is no longer a regular file) the file is deleted and an error is returned, never the path.
+    pub fn verify_before_run(&self) -> Result<&std::path::Path, anyhow::Error> {
+        let is_regular = std::fs::symlink_metadata(&self.file)
+            .map(|meta| meta.is_file())
+            .unwrap_or(false);
+        let matches = is_regular
+            && file_sha256(&self.file)
+                .map(|hash| hash.eq_ignore_ascii_case(self.sha256.trim()))
+                .unwrap_or(false);
+        if matches {
+            return Ok(&self.file);
+        }
+        if let Err(error) = std::fs::remove_file(&self.file) {
+            println!("Could not remove {}: {error}", self.file.display());
+        }
+        Err(anyhow!(
+            "The update installer changed after it was verified; it was refused and deleted"
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -178,6 +204,7 @@ impl Updater {
             return Ok(Some(Update {
                 version,
                 file: dest,
+                sha256: installer.checksum.trim().to_string(),
             }));
         }
         // Downloaded aside and renamed once verified, so `dest` is never a partial or unverified file
@@ -242,6 +269,7 @@ impl Updater {
         let update = Some(Update {
             version,
             file: dest,
+            sha256: installer.checksum.trim().to_string(),
         });
         Ok(update)
     }
@@ -471,6 +499,29 @@ mod tests {
         let error = updater.autoupdate().unwrap_err();
         assert!(format!("{:?}", error).contains("non-HTTPS"), "{:?}", error);
         assert_eq!(hits.load(Ordering::SeqCst), 1, "only the redirect was hit");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn installer_replaced_after_download_is_refused_and_deleted() {
+        let (endpoint, _) = serve("1.0.18", &sha256_hex(INSTALLER));
+        let (updater, dir) = updater_for(&endpoint, "1.0.17", "toctou");
+        let update = updater.autoupdate().unwrap().expect("update expected");
+        assert_eq!(update.verify_before_run().unwrap(), update.file.as_path());
+        std::fs::write(&update.file, b"malicious replacement").unwrap();
+        let error = update.verify_before_run().unwrap_err();
+        assert!(error.to_string().contains("changed"), "{}", error);
+        assert!(!update.file.exists(), "tampered installer must be deleted");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn installer_removed_after_download_is_refused() {
+        let (endpoint, _) = serve("1.0.18", &sha256_hex(INSTALLER));
+        let (updater, dir) = updater_for(&endpoint, "1.0.17", "toctou-gone");
+        let update = updater.autoupdate().unwrap().expect("update expected");
+        std::fs::remove_file(&update.file).unwrap();
+        assert!(update.verify_before_run().is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 
