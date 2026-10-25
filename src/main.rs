@@ -61,26 +61,6 @@ struct Opt {
     server_ipc_key: String,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn devtools_option_is_opt_in_and_keeps_the_old_spelling() {
-        assert!(
-            Opt::try_parse_from(["laststream", "--devtools"])
-                .unwrap()
-                .devtools
-        );
-        assert!(
-            Opt::try_parse_from(["laststream", "--dev-tools"])
-                .unwrap()
-                .devtools
-        );
-        assert!(!Opt::try_parse_from(["laststream"]).unwrap().devtools);
-    }
-}
-
 fn main() {
     nwg::enable_visual_styles();
 
@@ -151,4 +131,24 @@ fn main() {
     })
     .expect("Failed to build UI");
     nwg::dispatch_thread_events();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn devtools_option_is_opt_in_and_keeps_the_old_spelling() {
+        assert!(
+            Opt::try_parse_from(["laststream", "--devtools"])
+                .unwrap()
+                .devtools
+        );
+        assert!(
+            Opt::try_parse_from(["laststream", "--dev-tools"])
+                .unwrap()
+                .devtools
+        );
+        assert!(!Opt::try_parse_from(["laststream"]).unwrap().devtools);
+    }
 }

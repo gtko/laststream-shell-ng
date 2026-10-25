@@ -296,7 +296,9 @@ mod tests {
             let params = sample_params(*kind);
             assert!(
                 check_command(name, params.as_ref()).is_ok(),
-                "{name} must be accepted with a {kind:?} parameter"
+                "{} must be accepted with a {:?} parameter",
+                name,
+                kind
             );
         }
     }
@@ -313,7 +315,8 @@ mod tests {
         ] {
             assert!(
                 check_command(method, None).is_err(),
-                "{method:?} is not in the allowlist and must be refused"
+                "{:?} is not in the allowlist and must be refused",
+                method
             );
         }
     }
