@@ -844,7 +844,7 @@ fn buffer_options(max_bytes: u64) -> Vec<(&'static str, String)> {
 }
 
 /// Tampon mpv par défaut, appliqué à l'init avant tout `loadfile`. Aucune surcharge par `mpv-set-prop` n'est acceptée
-/// aujourd'hui : `PropKey` ne liste pas ces propriétés (voir `docs/mpv-cache.md`, section « Surcharge par l'UI »).
+/// aujourd'hui : `PropKey` ne liste pas ces propriétés (voir `docs/mpv-cache.md`, Décisions, point 2 ; suivi LAST-181).
 fn default_buffer_options() -> Vec<(&'static str, String)> {
     buffer_options(DEMUXER_MAX_BYTES)
 }
