@@ -42,7 +42,7 @@ les donnees restent lisibles apres une mise a jour.
 Import au premier lancement
 ---------------------------
 Si ce dossier ne contient encore ni laststream.db ni .env, la coque copie les donnees de
-l'instance de developpement (C:\Users\grego\Projets\laststream\lastaddon) : base
+l'instance lastAddon de developpement presente sur le poste, s'il y en a une : base
 laststream.db avec ses fichiers WAL/SHM, et .env (secret). Compte, profils, bibliotheque et
 progression sont conserves, et les configurations chiffrees restent valides. Rien n'est
 ecrase : un second lancement n'importe rien. Pour un import propre, arreter l'instance de
