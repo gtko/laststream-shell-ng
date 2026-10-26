@@ -793,26 +793,20 @@ fn create_mpv(window_handle: HWND) -> Result<Mpv, libmpv2::Error> {
 
 const MIB: u64 = 1024 * 1024;
 
-/// Octets lus d'avance (`demuxer-max-bytes`) : borne prioritaire du tampon. Valeur mesurée, voir `docs/mpv-cache.md`.
-const DEMUXER_MAX_BYTES: u64 = 200 * MIB;
+/// Octets lus d'avance (`demuxer-max-bytes`) : seule borne qui limite la mémoire du tampon. Valeur mesurée, voir `docs/mpv-cache.md`.
+const DEMUXER_MAX_BYTES: u64 = 120 * MIB;
 /// Octets gardés derrière la lecture (`demuxer-max-back-bytes`), pour revenir en arrière sans relire le flux.
-const DEMUXER_MAX_BACK_BYTES: u64 = 50 * MIB;
-/// Débit le plus élevé visé (4K, 25 Mbit/s). Les secondes de tampon sont ce que la borne en octets permet à ce débit :
-/// au-delà, la borne en octets coupe avant les secondes ; en dessous, les secondes peuvent couper avant elle.
-const CACHE_REFERENCE_BITRATE_BPS: u64 = 25_000_000;
-/// Plafond d'une surcharge de tampon par l'UI (1 GiB, taille du niveau « max »). Les secondes sont bornées de la même façon.
+const DEMUXER_MAX_BACK_BYTES: u64 = 30 * MIB;
+/// Secondes de tampon (`cache-secs`, `demuxer-readahead-secs`). Elles ne limitent pas la mémoire : la borne en octets le fait.
+const CACHE_SECONDS: u64 = 3600;
+/// Plafond d'une surcharge de tampon par l'UI (1 GiB, taille du niveau « max »). La borne en octets est plafonnée à cette valeur.
 const BUFFER_CEILING_BYTES: u64 = 1024 * MIB;
 
-/// Secondes de tampon qu'une borne en octets permet au débit de référence.
-const fn seconds_for_bytes(bytes: u64) -> u64 {
-    bytes * 8 / CACHE_REFERENCE_BITRATE_BPS
-}
-
 /// Options de tampon mpv pour une borne en octets, plafonnée à `BUFFER_CEILING_BYTES`.
-/// `cache-secs` et `demuxer-readahead-secs` suivent la borne : elles ne promettent jamais plus qu'elle ne permet.
+/// `cache-secs` et `demuxer-readahead-secs` restent à `CACHE_SECONDS` : seule la borne en octets limite la mémoire.
 fn buffer_options(max_bytes: u64) -> Vec<(&'static str, String)> {
     let max_bytes = max_bytes.min(BUFFER_CEILING_BYTES);
-    let secs = seconds_for_bytes(max_bytes).to_string();
+    let secs = CACHE_SECONDS.to_string();
     vec![
         ("cache", "yes".to_string()),
         ("cache-secs", secs.clone()),
@@ -1345,7 +1339,7 @@ fn run_message_loop(
 mod tests {
     use super::{
         buffer_options, default_buffer_options, ResumeState, VideoReadyState, BUFFER_CEILING_BYTES,
-        CACHE_REFERENCE_BITRATE_BPS, MIB,
+        CACHE_SECONDS, MIB,
     };
     use crate::laststream_app::laststream_player::communication::{BoolProp, FpProp};
     use crate::laststream_app::laststream_player::{
@@ -1518,10 +1512,10 @@ mod tests {
         let table = default_buffer_options();
         let expected = [
             ("cache", "yes"),
-            ("cache-secs", "67"),
-            ("demuxer-readahead-secs", "67"),
-            ("demuxer-max-bytes", "209715200"),
-            ("demuxer-max-back-bytes", "52428800"),
+            ("cache-secs", "3600"),
+            ("demuxer-readahead-secs", "3600"),
+            ("demuxer-max-bytes", "125829120"),
+            ("demuxer-max-back-bytes", "31457280"),
             ("cache-pause-wait", "5"),
         ];
         assert_eq!(table.len(), expected.len());
@@ -1537,29 +1531,30 @@ mod tests {
             .parse()
             .expect("demuxer-max-bytes is a byte count");
         assert_eq!(bytes % MIB, 0);
-        assert_eq!(bytes / MIB, 200);
+        assert_eq!(bytes / MIB, 120);
     }
 
     #[test]
-    fn default_seconds_never_promise_more_than_the_byte_bound_allows() {
+    fn default_seconds_are_not_the_memory_limit() {
         let table = default_buffer_options();
         let bytes: u64 = option_value(&table, "demuxer-max-bytes").parse().unwrap();
         let secs: u64 = option_value(&table, "demuxer-readahead-secs")
             .parse()
             .unwrap();
         assert_eq!(option_value(&table, "cache-secs"), secs.to_string());
-        assert!(secs * CACHE_REFERENCE_BITRATE_BPS / 8 <= bytes);
+        assert_eq!(secs, CACHE_SECONDS);
+        assert!(bytes < BUFFER_CEILING_BYTES);
     }
 
     #[test]
-    fn buffer_bound_is_capped_at_the_ceiling_with_its_seconds() {
+    fn buffer_bound_is_capped_at_the_ceiling() {
         let table = buffer_options(2 * BUFFER_CEILING_BYTES);
         assert_eq!(
             option_value(&table, "demuxer-max-bytes"),
             BUFFER_CEILING_BYTES.to_string()
         );
-        assert_eq!(option_value(&table, "cache-secs"), "343");
-        assert_eq!(option_value(&table, "demuxer-readahead-secs"), "343");
+        assert_eq!(option_value(&table, "cache-secs"), "3600");
+        assert_eq!(option_value(&table, "demuxer-readahead-secs"), "3600");
     }
 
     #[test]
@@ -1569,6 +1564,6 @@ mod tests {
             option_value(&table, "demuxer-max-bytes"),
             (100 * MIB).to_string()
         );
-        assert_eq!(option_value(&table, "cache-secs"), "33");
+        assert_eq!(option_value(&table, "cache-secs"), "3600");
     }
 }

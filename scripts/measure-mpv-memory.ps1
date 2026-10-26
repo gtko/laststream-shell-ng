@@ -17,8 +17,8 @@ param(
     [Parameter(Mandatory)][int]$DurationSec,
     [string]$Label = 'run',
     [string[]]$Options = @(
-        'cache=yes', 'cache-secs=67', 'demuxer-readahead-secs=67',
-        'demuxer-max-bytes=209715200', 'demuxer-max-back-bytes=52428800', 'cache-pause-wait=5'
+        'cache=yes', 'cache-secs=3600', 'demuxer-readahead-secs=3600',
+        'demuxer-max-bytes=125829120', 'demuxer-max-back-bytes=31457280', 'cache-pause-wait=5'
     )
 )
 $ErrorActionPreference = 'Stop'

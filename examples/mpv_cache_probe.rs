@@ -5,6 +5,20 @@
 use libmpv2::{events::Event, Mpv};
 use std::time::{Duration, Instant};
 
+/// Valeur entière d'une clé de `demuxer-cache-state` (chaîne JSON produite par mpv), ou `n/a`.
+fn json_number(state: &str, key: &str) -> String {
+    state
+        .split(&format!("\"{key}\":"))
+        .nth(1)
+        .map(|rest| {
+            rest.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+        })
+        .filter(|digits| !digits.is_empty())
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 fn main() {
     let usage = "usage: mpv_cache_probe <url> <secondes> [nom=valeur ...]";
     let mut args = std::env::args().skip(1);
@@ -54,14 +68,15 @@ fn main() {
         }
         if Instant::now() >= next_report {
             next_report += Duration::from_secs(10);
-            let used = mpv
-                .get_property::<i64>("cache-used")
-                .map(|kib| format!("{kib} KiB"))
-                .unwrap_or_else(|_| "n/a".to_string());
+            let state = mpv
+                .get_property::<String>("demuxer-cache-state")
+                .unwrap_or_default();
             let pos = mpv.get_property::<f64>("time-pos").unwrap_or(-1.0);
             println!(
-                "t={}s time-pos={pos:.1}s cache-used={used}",
-                start.elapsed().as_secs()
+                "t={}s time-pos={pos:.1}s fw-bytes={} total-bytes={}",
+                start.elapsed().as_secs(),
+                json_number(&state, "fw-bytes"),
+                json_number(&state, "total-bytes"),
             );
         }
     }
