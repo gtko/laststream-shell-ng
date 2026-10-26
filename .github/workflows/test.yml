@@ -23,7 +23,7 @@ env:
 
 # Jobs independants, lances en parallele (LAST-483). Memes verifications et memes options qu'avant.
 # Checkout superficiel (fetch-depth: 1) : aucun script, build.rs ni commande ne lit l'historique git ni les tags.
-# Cache cargo partage : les jobs qui utilisent la toolchain ont la meme cache-shared-key.
+# Cache cargo : fmt-clippy et test partagent une cle (x86 debug), build-arm64 a la sienne (release aarch64).
 jobs:
   manifest-scripts:
     runs-on: windows-latest
@@ -107,7 +107,7 @@ jobs:
       with:
         toolchain: stable
         target: aarch64-pc-windows-msvc
-        cache-shared-key: laststream-shell-windows
+        cache-shared-key: laststream-shell-windows-arm64
     # pwsh et non bash : Git Bash met /usr/bin/link devant le link.exe MSVC et casse l'edition de liens ARM64.
     - name: ARM64 build (release, no tests)
       shell: pwsh
