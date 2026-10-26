@@ -20,7 +20,7 @@
   Le tag vX.Y.Z doit deja etre pousse sur origin (--verify-tag).
 
 .PARAMETER Version
-  X.Y.Z. Doit correspondre a Cargo.toml de ce depot ; le tag est vX.Y.Z.
+  X.Y.Z. Doit correspondre a Cargo.toml de ce depot ; le tag est vX.Y.Z. Avec -DryRun, un ecart n'est qu'un avertissement.
 
 .PARAMETER DryRun
   Fait tout, sauf l'appel a gh release (rien n'est envoye).
@@ -50,7 +50,11 @@ $stage = Join-Path $shellRoot "dist\stage-$tag"
 
 $cargoToml = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) 'Cargo.toml') -Raw
 $cargoVersion = [regex]::Match($cargoToml, '(?m)^version = "([^"]+)"').Groups[1].Value
-if ($cargoVersion -ne $Version) { throw "Cargo.toml de ce depot porte $cargoVersion, pas $Version." }
+if ($cargoVersion -ne $Version) {
+    $msg = "Cargo.toml de ce depot porte $cargoVersion, pas $Version."
+    # En DryRun, l'ecart n'est qu'un avertissement (rien n'est publie) ; hors DryRun il bloque.
+    if ($DryRun) { Write-Warning $msg } else { throw $msg }
+}
 
 # 1. Depots voisins : propres, sur main, egaux a origin/main. Tous les problemes sont listes avant d'abandonner.
 $problems = [System.Collections.Generic.List[string]]::new()
@@ -58,7 +62,8 @@ $commits = [ordered]@{}
 foreach ($dir in @($appDir, $addonDir)) {
     $name = Split-Path -Leaf $dir
     if (-not (Test-Path -LiteralPath (Join-Path $dir '.git'))) { $problems.Add("$name : depot absent ($dir)"); continue }
-    $dirty = @(git -C $dir status --porcelain)
+    # Fichiers suivis seulement : les non suivis (.claude/, nul) ne bloquent pas.
+    $dirty = @(git -C $dir status --porcelain --untracked-files=no)
     if ($dirty.Count -gt 0) { $problems.Add("$name : arbre non propre ($($dirty.Count) entree(s) : $($dirty -join ' ; '))") }
     $branch = git -C $dir rev-parse --abbrev-ref HEAD
     if ($branch -ne 'main') { $problems.Add("$name : branche $branch, attendu main") }

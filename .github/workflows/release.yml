@@ -1,6 +1,7 @@
 name: Release
 
-# Publication d'une version Windows, sur un tag v* (ex. v1.0.25) ou a la main (workflow_dispatch, avec un tag deja pousse).
+# Publication d'une version Windows, lancee a la main (workflow_dispatch, avec un tag deja pousse, ex. v1.0.25).
+# Un push de tag ne la lance pas : elle ne part qu'apres le staging des dependances.
 # Les archives des depots voisins (ui.zip, lastaddon.zip, deps.json) sont preparees en local par
 # scripts/stage-release-deps.ps1 et posees sur la release brouillon du tag. Ce workflow ne lit aucun autre depot,
 # n'a aucun jeton inter-depots et ne telecharge que les trois fichiers de la release.
@@ -8,13 +9,10 @@ name: Release
 # Le televersement R2 reste manuel (upload.ps1) : aucun jeton Cloudflare dans ce workflow.
 # Pas d'Authenticode (decision produit) : l'installeur n'est pas signe de code.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag deja pousse a publier (ex. v1.0.25)'
+        description: 'Tag deja pousse a publier, format vX.Y.Z (ex. v1.0.25)'
         required: true
         type: string
 
@@ -30,10 +28,15 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+    - name: Validate the tag input (vX.Y.Z)
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+\z') { throw "Tag invalide '$env:RELEASE_TAG' : format vX.Y.Z attendu (ex. v1.0.25)." }
     - name: Download the staged dependencies from the release
       shell: pwsh
       run: |
@@ -68,7 +71,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
     # The Windows runners have autocrlf enabled by default (voir test.yml)
     - name: disable git eol translation
@@ -76,7 +79,7 @@ jobs:
     - name: checkout
       uses: actions/checkout@v6
       with:
-        ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+        ref: ${{ format('refs/tags/{0}', inputs.tag) }}
         persist-credentials: false
     - name: Check the tag matches the versions (Cargo.toml, Cargo.lock, Laststream.iss)
       shell: bash
@@ -105,8 +108,8 @@ jobs:
       run: |
         rustup target add aarch64-pc-windows-msvc
         cargo build --release --locked --target aarch64-pc-windows-msvc
-    # dist\laststream-desktop : fichiers du depot (bin/, server.js, libmpv), archives ui/ et lastaddon/ verifiees,
-    # et le binaire x64 compile ici, qui remplace laststream.exe.
+    # dist\laststream-desktop : fichiers du depot (bin/, server.js, README-FR.txt de setup/, libmpv), archives ui/ et
+    # lastaddon/ verifiees, et le binaire x64 compile ici, qui remplace laststream.exe.
     - name: Assemble dist/laststream-desktop
       shell: pwsh
       run: |
@@ -115,6 +118,7 @@ jobs:
         New-Item -ItemType Directory -Force $bundle | Out-Null
         Copy-Item -Path 'bin/*' -Destination $bundle -Force
         Copy-Item -LiteralPath 'server.js' -Destination $bundle -Force
+        Copy-Item -LiteralPath 'setup/README-FR.txt' -Destination $bundle -Force
         Expand-Archive -LiteralPath 'libmpv-2_x64.zip' -DestinationPath 'dist/mpv-x64' -Force
         $mpv = Get-ChildItem -Path 'dist/mpv-x64' -Recurse -Filter 'libmpv-2.dll' | Select-Object -First 1
         if (-not $mpv) { throw 'libmpv-2.dll absent de libmpv-2_x64.zip' }
@@ -162,7 +166,7 @@ jobs:
     permissions:
       contents: write
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      RELEASE_TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -171,7 +175,7 @@ jobs:
     - name: checkout
       uses: actions/checkout@v6
       with:
-        ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+        ref: ${{ format('refs/tags/{0}', inputs.tag) }}
         persist-credentials: false
     - name: Download the installer
       uses: actions/download-artifact@v4
