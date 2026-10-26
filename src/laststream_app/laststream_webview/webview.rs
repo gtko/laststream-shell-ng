@@ -1,6 +1,6 @@
-use crate::stremio_app::constants::{safe_url, SERVER_IPC_KEY};
-use crate::stremio_app::ipc;
-use crate::stremio_app::robust::{self, OrReport};
+use crate::laststream_app::constants::{safe_url, SERVER_IPC_KEY};
+use crate::laststream_app::ipc;
+use crate::laststream_app::robust::{self, OrReport};
 use native_windows_gui::{self as nwg, PartialUi};
 use once_cell::unsync::OnceCell;
 use serde_json::json;
@@ -429,7 +429,7 @@ fn devtools_allowed(debug_build: bool, devtools_flag: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stremio_app::shell_config::PUBLIC_URL;
+    use crate::laststream_app::shell_config::PUBLIC_URL;
 
     fn trusted(endpoint: &str) -> Option<url::Origin> {
         trusted_origin(&RefCell::new(Some(endpoint.to_owned())))

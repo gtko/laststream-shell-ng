@@ -7,10 +7,11 @@ use whoami::username;
 
 use clap::Parser;
 use native_windows_gui::{self as nwg, NativeUi};
-mod stremio_app;
-use crate::stremio_app::{
+mod laststream_app;
+use crate::laststream_app::{
     constants::{
-        DEV_ENDPOINT, IPC_PATH, SERVER_IPC_KEY, STA_ENDPOINT, STREMIO_SERVER_DEV_MODE, WEB_ENDPOINT,
+        DEV_ENDPOINT, IPC_PATH, LASTSTREAM_SERVER_DEV_MODE, SERVER_IPC_KEY, STA_ENDPOINT,
+        WEB_ENDPOINT,
     },
     MainWindow, PipeClient,
 };
@@ -78,7 +79,7 @@ fn main() {
     let command = opt
         .command
         .filter(|command| !command.is_empty())
-        .map(stremio_app::open_media::normalize)
+        .map(laststream_app::open_media::normalize)
         .unwrap_or_default();
 
     // Single application IPC
@@ -102,7 +103,7 @@ fn main() {
     // END IPC
 
     std::env::set_var(
-        STREMIO_SERVER_DEV_MODE,
+        LASTSTREAM_SERVER_DEV_MODE,
         if opt.development { "true" } else { "false" },
     );
 
@@ -122,7 +123,7 @@ fn main() {
         no_splash: opt.no_splash,
         dev_tools: opt.development || opt.devtools,
         start_hidden: opt.start_hidden,
-        autoupdater_endpoint: stremio_app::updater::resolve_endpoint(
+        autoupdater_endpoint: laststream_app::updater::resolve_endpoint(
             opt.autoupdater_endpoint,
             opt.no_autoupdater || opt.development,
         ),

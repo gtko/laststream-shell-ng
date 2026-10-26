@@ -11,7 +11,7 @@ pub const UPDATE_INTERVAL: u64 = 12 * 60 * 60;
 /// Version feed published by `upload.ps1` (ODY-250), checked unless `--no-autoupdater` is given.
 pub const DEFAULT_AUTOUPDATER_ENDPOINT: &str =
     "https://laststream.gtux-prog.workers.dev/app/windows/latest.json";
-pub const STREMIO_SERVER_DEV_MODE: &str = "STREMIO_SERVER_DEV_MODE";
+pub const LASTSTREAM_SERVER_DEV_MODE: &str = "LASTSTREAM_SERVER_DEV_MODE";
 pub const SRV_BUFFER_SIZE: usize = 1024;
 pub const SERVER_IPC_KEY: &str = "SERVER_IPC_KEY";
 pub const SRV_LOG_SIZE: usize = 20;
@@ -62,8 +62,8 @@ mod tests {
     #[test]
     fn http_links_open_directly() {
         assert_eq!(
-            safe_url("https://www.stremio.com/"),
-            Some("https://www.stremio.com/".to_string())
+            safe_url("https://www.example.com/"),
+            Some("https://www.example.com/".to_string())
         );
         assert_eq!(
             safe_url("https://www.themoviedb.org/movie/603?language=fr"),
@@ -95,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn single_instance_pipe_is_not_shared_with_stremio() {
+    fn single_instance_pipe_is_not_shared_with_other_apps() {
         assert_eq!(IPC_PATH, "//./pipe/com.laststream.");
     }
 }

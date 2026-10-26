@@ -38,7 +38,7 @@ pub struct StartupPlan {
 
 impl Target {
     /// `explicit_webui`: the user passed `--webui-url`/`--development`/`--staging`; the former
-    /// Stremio web flow (and its streaming server) is then kept as is.
+    /// hosted web flow (and its streaming server) is then kept as is.
     pub fn plan(&self, explicit_webui: bool) -> StartupPlan {
         if explicit_webui {
             return StartupPlan {
