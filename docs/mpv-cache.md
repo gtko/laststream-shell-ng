@@ -63,5 +63,6 @@ Tampon plein (`fw-bytes` et `total-bytes`, sonde finale) :
 1. **Tampon 120 MiB + 30 MiB de retour** (`DEMUXER_MAX_BYTES`, `DEMUXER_MAX_BACK_BYTES`). La cible 1080p est tenue (279,7 Mo en privé).
 2. **Surcharge « Mémoire tampon » de l'UI inactive.** Le réglage de l'UI (`app-221/src/player/bufferLevel.ts`, `mpvBufferProps` : standard 150 MiB, large 512 MiB, max 1 GiB, `cache-secs` 3600), envoyé par `engines.js:359` via `mpv-set-prop`, est refusé côté shell : `PropKey` (`laststream_player/communication.rs`) ne liste aucune de ces propriétés. Constat fait à la lecture du code, non testé à l'exécution. Suivi : issue séparée LAST-181. Si on les ouvre, plafonner via `buffer_options(max_bytes)` (plafond 1 GiB, déjà codé et testé) et aligner `bufferLevel.ts` (repo UI, hors périmètre).
 3. **Secondes à 3600.** `cache-secs` et `demuxer-readahead-secs` ne sont plus dérivées de la borne en octets. À 25 Mbit/s, 67 s coupaient les faibles débits avant la borne. Seule `demuxer-max-bytes` limite la mémoire.
+4. **Délai réseau 30 s au lieu de 60 s (LAST-187).** `network-timeout` passe de 60 s (défaut mpv) à 30 s : une connexion figée est signalée, donc reprise, plus tôt.
 
 Piste non retenue : `vd-lavc-threads=1` (diagnostic antérieur : 384 Mo en 4K avec le tampon 200 MiB). Il change le décodage 4K ; à mesurer séparément avant toute adoption.
