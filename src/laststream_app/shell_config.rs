@@ -6,7 +6,7 @@ use std::{fs, io, path::PathBuf, thread, time::Duration};
 use url::Url;
 
 /// Public Laststream service (web interface and API). The only place to change for a new domain.
-pub const PUBLIC_URL: &str = "https://laststream.gtux-prog.workers.dev/";
+pub const PUBLIC_URL: &str = "https://app.laststream.app/";
 /// Timeout of each attempt of the start-up probe: long enough for a cold DNS/TLS start on the
 /// first launch of a fresh executable (SmartScreen/antivirus scan), still bounded.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
