@@ -14,4 +14,10 @@ ignore = [
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
   "RUSTSEC-2026-0009",
+  # zstd 0.13.3, zstd-safe 7.2.4 et zstd-sys 2.0.15 : meme chemin (zip 4.2.0 <- zip-extract 0.4.0, build-dependency de build.rs),
+  # archives libmpv versionnees de confiance. `cargo tree -e normal -i zstd` ne renvoie rien : absents du binaire livre (LAST-201).
+  "RUSTSEC-2026-0391",
+  "RUSTSEC-2026-0398",
+  "RUSTSEC-2026-0403",
+  "RUSTSEC-2026-0410",
 ]
