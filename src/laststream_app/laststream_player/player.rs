@@ -762,14 +762,29 @@ impl PartialUi for Player {
     }
 }
 
-/// Options `stream-lavf-o` : reconnexion ffmpeg. `%23%` escapes the 23-byte HTTP status list as one mpv option value.
-/// `reconnect_at_eof` reprend aussi un flux coupé proprement à la fin (LAST-187).
-const LAVF_STREAM_OPTIONS: &str = "reconnect=1,reconnect_streamed=1,reconnect_at_eof=1,reconnect_on_network_error=1,reconnect_on_http_error=%23%408,429,500,502,503,504,reconnect_delay_max=15";
-
-/// Options réseau mpv posées à l'init, avant tout `loadfile`. `network-timeout` (secondes) : une connexion figée
-/// ou fermée sans erreur devient une erreur, donc une reprise, au lieu de bloquer mpv (LAST-187).
-fn network_options() -> Vec<(&'static str, &'static str)> {
-    vec![("network-timeout", "30")]
+/// Options mpv statiques posées à l'init, avant tout `loadfile`. Fonction pure : `create_mpv` lui passe l'architecture mémoire du GPU.
+fn init_options(unified_memory: bool) -> Vec<(&'static str, &'static str)> {
+    let mut options = vec![
+        ("gpu-context", "d3d11"),
+        ("d3d11-output-format", "auto"),
+        ("d3d11-output-csp", "auto"),
+        ("target-colorspace-hint", "auto"),
+        ("target-colorspace-hint-mode", "target"),
+        ("tone-mapping", "bt.2390"),
+        ("dither-depth", "auto"),
+        // `network-timeout` vaut 60 s par défaut dans mpv ; 30 s borne plus tôt une connexion figée (LAST-187).
+        ("network-timeout", "30"),
+    ];
+    if unified_memory {
+        options.push(("profile", "fast"));
+    } else {
+        options.extend([
+            ("deband", "yes"),
+            ("scale", "spline36"),
+            ("cscale", "spline36"),
+        ]);
+    }
+    options
 }
 
 fn create_mpv(window_handle: HWND) -> Result<Mpv, libmpv2::Error> {
@@ -791,29 +806,15 @@ fn create_mpv(window_handle: HWND) -> Result<Mpv, libmpv2::Error> {
         set_property!("msg-level", "all=no");
         set_property!("quiet", "yes");
         set_property!("hwdec", "auto");
-        set_property!("stream-lavf-o", LAVF_STREAM_OPTIONS);
+        // `%23%` escapes the 23-byte HTTP status list as one mpv option value.
+        set_property!(
+            "stream-lavf-o",
+            "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_on_http_error=%23%408,429,500,502,503,504,reconnect_delay_max=15"
+        );
         // gpu-next: libplacebo VO with modern HDR tone-mapping; gpu, is the fallback.
         set_property!("vo", "gpu-next,gpu,");
         let buffer = default_buffer_options();
-        let mut options = vec![
-            ("gpu-context", "d3d11"),
-            ("d3d11-output-format", "auto"),
-            ("d3d11-output-csp", "auto"),
-            ("target-colorspace-hint", "auto"),
-            ("target-colorspace-hint-mode", "target"),
-            ("tone-mapping", "bt.2390"),
-            ("dither-depth", "auto"),
-        ];
-        if gpu_video_processing::unified_memory_architecture() {
-            options.push(("profile", "fast"));
-        } else {
-            options.extend([
-                ("deband", "yes"),
-                ("scale", "spline36"),
-                ("cscale", "spline36"),
-            ]);
-        }
-        options.extend(network_options());
+        let mut options = init_options(gpu_video_processing::unified_memory_architecture());
         options.extend(buffer.iter().map(|(name, value)| (*name, value.as_str())));
         for (name, value) in options {
             if let Err(error) = initializer.set_property(name, value) {
@@ -1371,9 +1372,8 @@ fn run_message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        buffer_options, default_buffer_options, network_options, restart_player, PlayerContext,
-        RestartStop, ResumeState, VideoReadyState, BUFFER_CEILING_BYTES, CACHE_SECONDS,
-        LAVF_STREAM_OPTIONS, MIB,
+        buffer_options, default_buffer_options, init_options, restart_player, PlayerContext,
+        RestartStop, ResumeState, VideoReadyState, BUFFER_CEILING_BYTES, CACHE_SECONDS, MIB,
     };
     use crate::laststream_app::laststream_player::communication::{BoolProp, FpProp};
     use crate::laststream_app::laststream_player::{
@@ -1627,15 +1627,23 @@ mod tests {
     }
 
     #[test]
-    fn lavf_reconnect_options_gain_eof_reconnect_and_keep_the_rest() {
-        assert_eq!(
-            LAVF_STREAM_OPTIONS,
-            "reconnect=1,reconnect_streamed=1,reconnect_at_eof=1,reconnect_on_network_error=1,reconnect_on_http_error=%23%408,429,500,502,503,504,reconnect_delay_max=15"
-        );
-    }
-
-    #[test]
-    fn network_timeout_is_set_at_init_before_any_loadfile() {
-        assert_eq!(network_options(), vec![("network-timeout", "30")]);
+    fn init_options_set_network_timeout_to_30_seconds_once() {
+        for unified_memory in [false, true] {
+            let options = init_options(unified_memory);
+            assert!(
+                options.contains(&("network-timeout", "30")),
+                "unified_memory={}: network-timeout=30 absent",
+                unified_memory
+            );
+            assert_eq!(
+                options
+                    .iter()
+                    .filter(|(name, _)| *name == "network-timeout")
+                    .count(),
+                1,
+                "unified_memory={}: network-timeout listed once",
+                unified_memory
+            );
+        }
     }
 }
