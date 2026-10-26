@@ -9,10 +9,7 @@ use clap::Parser;
 use native_windows_gui::{self as nwg, NativeUi};
 mod laststream_app;
 use crate::laststream_app::{
-    constants::{
-        DEV_ENDPOINT, IPC_PATH, LASTSTREAM_SERVER_DEV_MODE, SERVER_IPC_KEY, STA_ENDPOINT,
-        WEB_ENDPOINT,
-    },
+    constants::{DEV_ENDPOINT, IPC_PATH, LASTSTREAM_SERVER_DEV_MODE, SERVER_IPC_KEY},
     MainWindow, PipeClient,
 };
 
@@ -35,8 +32,6 @@ struct Opt {
     devtools: bool,
     #[clap(long, help = "Disable the server and load the WebUI from localhost")]
     development: bool,
-    #[clap(long, help = "Shortcut for --webui-url=https://staging.strem.io/")]
-    staging: bool,
     #[clap(
         long,
         help = "Override the WebUI URL (default: the Laststream app served by the local service)"
@@ -60,6 +55,12 @@ struct Opt {
         help = "Secret key for communication with the server. By default it is randomly generrated on startup"
     )]
     server_ipc_key: String,
+}
+
+/// `--webui-url` is loaded as given. Without it, `--development` loads the local dev server.
+/// `None` keeps the Laststream app served by the local service.
+fn resolve_webui_url(webui_url: Option<String>, development: bool) -> Option<String> {
+    webui_url.or_else(|| development.then(|| DEV_ENDPOINT.to_string()))
 }
 
 fn main() {
@@ -107,13 +108,7 @@ fn main() {
         if opt.development { "true" } else { "false" },
     );
 
-    // None keeps the Laststream app served by the local service.
-    let webui_url = match opt.webui_url.as_deref() {
-        Some(url) if url != WEB_ENDPOINT => Some(url.to_string()),
-        _ if opt.development => Some(DEV_ENDPOINT.to_string()),
-        _ if opt.staging => Some(STA_ENDPOINT.to_string()),
-        explicit => explicit.map(str::to_string),
-    };
+    let webui_url = resolve_webui_url(opt.webui_url, opt.development);
 
     nwg::init().expect("Failed to init Native Windows GUI");
     let _app = MainWindow::build_ui(MainWindow {
@@ -151,5 +146,31 @@ mod tests {
                 .devtools
         );
         assert!(!Opt::try_parse_from(["laststream"]).unwrap().devtools);
+    }
+
+    #[test]
+    fn webui_url_option_is_loaded_as_given() {
+        let url = "https://example.com/";
+        assert_eq!(
+            resolve_webui_url(Some(url.to_string()), false),
+            Some(url.to_string())
+        );
+        assert_eq!(
+            resolve_webui_url(Some(url.to_string()), true),
+            Some(url.to_string())
+        );
+    }
+
+    #[test]
+    fn development_loads_the_dev_server_without_a_webui_url() {
+        assert_eq!(
+            resolve_webui_url(None, true),
+            Some(DEV_ENDPOINT.to_string())
+        );
+    }
+
+    #[test]
+    fn without_options_the_local_service_serves_the_webui() {
+        assert_eq!(resolve_webui_url(None, false), None);
     }
 }

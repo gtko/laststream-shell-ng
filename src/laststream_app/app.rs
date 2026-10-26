@@ -25,10 +25,7 @@ use winapi::{
 };
 
 use crate::laststream_app::{
-    constants::{
-        safe_url, web_endpoint_with_streaming_server, APP_NAME, UPDATE_INTERVAL, WEB_ENDPOINT,
-        WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
-    },
+    constants::{safe_url, APP_NAME, UPDATE_INTERVAL, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH},
     downloads,
     ipc::{check_command, CacheDirectoryRequest, RPCRequest, RPCResponse},
     lastaddon::{AddonEvent, LastAddon},
@@ -804,14 +801,7 @@ impl MainWindow {
         let Some(webui_url) = self.webui_url.as_deref() else {
             return;
         };
-        let endpoint = if webui_url.trim_end_matches('/') == WEB_ENDPOINT.trim_end_matches('/') {
-            server_url
-                .map(web_endpoint_with_streaming_server)
-                .unwrap_or_else(|| webui_url.to_owned())
-        } else {
-            webui_url.to_owned()
-        };
-        self.navigate_webui(endpoint);
+        self.navigate_webui(webui_url.to_owned());
     }
     fn navigate_webui(&self, endpoint: String) {
         if let Some(sender) = self.open_media_sender.borrow().as_ref() {
