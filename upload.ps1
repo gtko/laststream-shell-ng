@@ -49,8 +49,11 @@ if ($DryRun -and -not $env:LASTSTREAM_UPDATE_SIGNING_KEY) {
     Write-Host "(DryRun) LASTSTREAM_UPDATE_SIGNING_KEY absente : flux non signe, rien n'est envoye."
 } else {
     if (-not $env:LASTSTREAM_UPDATE_SIGNING_KEY) { throw 'LASTSTREAM_UPDATE_SIGNING_KEY absente : impossible de signer latest.json.' }
+    # Une signature restee d'une publication precedente de la meme version ne doit jamais etre envoyee.
+    Remove-Item $feedSig -ErrorAction SilentlyContinue
     node (Join-Path $PSScriptRoot 'scripts/sign-update.mjs') $manifest
     if ($LASTEXITCODE -ne 0) { throw 'Signature de latest.json echouee.' }
+    if (-not (Test-Path $feedSig)) { throw "Signature de latest.json absente apres signature : $feedSig" }
 }
 
 $put = @('--yes', 'wrangler@4', 'r2', 'object', 'put')
