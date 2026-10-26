@@ -51,6 +51,22 @@ Publication signée : la clé privée PEM (PKCS#8) est le secret GitHub `LASTSTR
 
 Signature : aucun certificat de signature de code n'est utilisé à ce jour, SmartScreen peut donc alerter au premier lancement. L'intégrité repose sur le SHA-256 du flux. Pour signer, définir l'outil `laststreamsign` dans Inno Setup puis compiler avec `/DSIGN`.
 
+## Release
+
+Une version Windows se publie par tag. Le workflow `.github/workflows/release.yml` compile, construit l'installeur et publie sur GitHub ; le téléversement R2 reste manuel.
+
+1. Aligner la version dans `Cargo.toml`, `Cargo.lock` et `setup/Laststream.iss`, puis pousser sur `main`.
+2. Créer et pousser le tag, de même numéro que `Cargo.toml` : `git tag v1.0.25` puis `git push origin v1.0.25`. Le workflow refuse un tag qui ne correspond pas à la version.
+3. Le workflow compile l'exécutable x64 et la cible ARM64 (binaire seulement : `setup\Laststream.iss` ne cible que x64compatible), construit `Laststream-Setup-X.Y.Z.exe` avec Inno Setup, puis dépose sur la Release GitHub l'installeur, `Laststream-Setup-X.Y.Z.exe.sha256`, `latest.json` et `latest.json.sig` (signature ed25519, secret `LASTSTREAM_UPDATE_SIGNING_KEY`). Pour rejouer une publication : « Run workflow » avec le tag existant.
+4. Téléversement R2 à la main, depuis un poste avec `wrangler login` et `LASTSTREAM_UPDATE_SIGNING_KEY` : `.\upload.ps1 -Installer <Laststream-Setup-X.Y.Z.exe téléchargé> -Notes "…"`. Aucun jeton Cloudflare n'est dans le workflow.
+
+Limites connues :
+- le job d'installeur exige le dossier `dist\laststream-desktop` (UI, Node, ffmpeg, lastAddon), qui n'est pas dans le dépôt : sans lui, le workflow échoue dès la vérification du tag, avant toute compilation ;
+- pas d'Authenticode (décision produit) : SmartScreen peut alerter ;
+- `latest.json` pointe vers l'URL R2, qui ne répond qu'après l'étape 4.
+
+Binaires volumineux : le dépôt contient déjà des binaires (`bin/`, `bin-arm64/`, `mpv-x64/`, `mpv-arm64/`, `libmpv-2_*.zip`, `server.js`). Leur historique n'est pas réécrit. Ne plus en ajouter : les bundles de build vont dans `dist/`, ignoré par git.
+
 ## Mentions de l'amont
 
 Les références restantes à l'ancien projet amont sont listées et justifiées dans [docs/stremio-mentions.md](docs/stremio-mentions.md).
