@@ -5,20 +5,22 @@
 //! le shell est une application fenêtrée sans console.
 //!
 //! Sentry (LAST-172) : `report_error` envoie aussi chaque erreur (`sentry::capture_message`, sans effet si Sentry n'est
-//! pas initialisé). Les paniques partent par l'intégration panique de Sentry, chaînée au hook de `install_panic_hook`.
-//! Tout texte est passé par `scrub` avant écriture ou envoi : bornage à 200 caractères, requêtes d'URL et jetons masqués.
+//! pas initialisé), une seule fois par ligne et au plus `SEND_CAP` fois par session. Les paniques partent par
+//! l'intégration panique de Sentry, chaînée au hook de `install_panic_hook`. Tout texte est passé par `scrub` avant
+//! écriture ou envoi : chemins d'utilisateur, URL réduites à leur hôte, jetons masqués, bornage à 200 caractères.
 
 use std::{
     any::Any,
-    collections::VecDeque,
+    collections::{hash_map::DefaultHasher, HashSet, VecDeque},
     fmt::Display,
     fs::{self, OpenOptions},
+    hash::{Hash, Hasher},
     io::Write,
     panic::{self, AssertUnwindSafe},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, MutexGuard, Once,
+        Mutex, MutexGuard, Once, OnceLock,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -33,15 +35,23 @@ const POLL: Duration = Duration::from_millis(200);
 pub const MAX_REPORT_CHARS: usize = 200;
 /// Remplacement des valeurs sensibles.
 const MASK: &str = "[masqué]";
-/// Paramètres dont la valeur est masquée partout (jetons de débrideur, mots de passe), sans distinction de casse.
+/// Envois Sentry autorisés par session, toutes erreurs confondues. Le journal local n'est pas limité.
+const SEND_CAP: usize = 50;
+/// Mots sensibles : une clé qui se termine par l'un d'eux (sans distinction de casse) voit sa valeur masquée partout.
+/// `refresh_token`, `id_token`, `client_secret`, `x-api-key` sont couverts par `token`, `secret`, `api-key`.
 const SECRET_KEYS: [&str; 6] = [
-    "access_token",
-    "apikey",
-    "api_key",
-    "password",
-    "secret",
-    "token",
+    "token", "secret", "password", "apikey", "api_key", "api-key",
 ];
+/// Caractères qui terminent une URL dans un texte (guillemets, parenthèses, crochets, virgule).
+const URL_END: &[char] = &['"', '\'', '<', '>', ')', ']', '}', ','];
+/// Caractères qui terminent une valeur `clé=valeur` ou JSON (paramètre suivant, fin de chaîne, fermeture).
+const VALUE_END: &[char] = &['&', ';', '"', '\'', ',', '}', ']', ')', '<', '>'];
+/// Caractères qui terminent le nom d'utilisateur dans un chemin `\Users\<nom>\`.
+const SEGMENT_END: &[char] = &[
+    '\\', '/', '"', '\'', '<', '>', '|', '*', '?', ')', ']', '}', ',', ';', '\n', '\r', '\t',
+];
+/// Parties de chemin qui précèdent le nom du dossier utilisateur (minuscules).
+const USER_DIR_MARKERS: [&str; 2] = ["\\users\\", "/users/"];
 
 #[cfg(not(test))]
 fn log_path() -> Option<PathBuf> {
@@ -84,11 +94,49 @@ fn journal(line: &str) {
     append_to_log(line);
 }
 
+/// Décide quelles lignes partent à Sentry : chaque ligne une seule fois, et au plus `SEND_CAP` envois par session.
+#[derive(Default)]
+struct SendLimiter {
+    fingerprints: HashSet<u64>,
+    sent: usize,
+}
+
+impl SendLimiter {
+    /// `true` si `line` doit partir à Sentry ; la décision est alors enregistrée.
+    fn admit(&mut self, line: &str) -> bool {
+        if self.sent >= SEND_CAP {
+            return false;
+        }
+        let mut hasher = DefaultHasher::new();
+        line.hash(&mut hasher);
+        if !self.fingerprints.insert(hasher.finish()) {
+            return false;
+        }
+        self.sent += 1;
+        true
+    }
+}
+
+/// Décisions d'envoi de la session, partagées par tous les fils.
+static SENT_LINES: OnceLock<Mutex<SendLimiter>> = OnceLock::new();
+
+fn admit_send(line: &str) -> bool {
+    let state = SENT_LINES.get_or_init(|| Mutex::new(SendLimiter::default()));
+    // Pas de `lock` ici : sa reprise sur verrou empoisonné appelle `report_error`, qui reviendrait ici.
+    let mut limiter = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    limiter.admit(line)
+}
+
 /// Journalise une erreur de production (contexte court, sans donnée de l'utilisateur) et l'envoie à Sentry si actif.
+/// L'envoi est limité (`SendLimiter`) ; le journal local reçoit toujours la ligne.
 pub fn report_error(context: &str, error: &dyn Display) {
     let line = scrub(&format!("{context}: {error}"));
     journal(&line);
-    sentry::capture_message(&line, sentry::Level::Error);
+    if admit_send(&line) {
+        sentry::capture_message(&line, sentry::Level::Error);
+    }
 }
 
 /// Installe le hook de panique (une seule fois) : la panique est journalisée avec son lieu et son message masqué,
@@ -113,12 +161,13 @@ pub fn install_panic_hook() {
     });
 }
 
-/// Prépare un texte d'erreur ou de panique pour le journal et Sentry : jetons et requêtes d'URL masqués, borné.
+/// Prépare un texte d'erreur ou de panique pour le journal et Sentry : dossier utilisateur, URL, jetons masqués, borné.
 pub fn scrub(text: &str) -> String {
-    truncate_chars(&mask_secrets(text), MAX_REPORT_CHARS)
+    truncate_chars(&mask_secrets(&mask_user_dirs(text)), MAX_REPORT_CHARS)
 }
 
-/// Masque les jetons de chaque mot (espaces conservés) : requête d'URL, `clé=valeur` sensible, valeur après `Bearer`.
+/// Masque les valeurs de chaque mot (espaces conservés) : URL réduite à son hôte, `clé=valeur` sensible, valeur qui suit
+/// `Bearer` ou une clé sensible suivie de `:` (`x-api-key: …`, `"apikey": "…"`).
 fn mask_secrets(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut mask_next = false;
@@ -130,69 +179,191 @@ fn mask_secrets(text: &str) -> String {
             continue;
         }
         if mask_next {
-            out.push_str(MASK);
+            out.push_str(&mask_whole_value(word));
             mask_next = false;
         } else {
-            mask_next = word
-                .trim_end_matches([':', ','])
-                .eq_ignore_ascii_case("bearer");
-            out.push_str(&mask_key_values(&mask_query(word)));
+            out.push_str(&mask_key_values(&mask_urls(word)));
+            mask_next = announces_value(word);
         }
         out.push_str(spacing);
     }
     out
 }
 
-/// `https://hôte/chemin?agent=…&apikey=…` devient `https://hôte/chemin?[masqué]` ; le délimiteur qui suit reste.
-fn mask_query(word: &str) -> String {
-    let Some(scheme) = word.find("://") else {
-        return word.to_owned();
-    };
-    let Some(question) = word[scheme..].find('?').map(|at| scheme + at) else {
-        return word.to_owned();
-    };
-    let tail = &word[question + 1..];
-    let end = tail
-        .find(['"', '\'', '<', '>', ')', ']', '}', ','])
-        .unwrap_or(tail.len());
-    format!("{}?{MASK}{}", &word[..question], &tail[end..])
+/// Le mot annonce que le mot suivant est une valeur à masquer : `Bearer`, ou une clé sensible suivie de `:`.
+fn announces_value(word: &str) -> bool {
+    if word
+        .trim_end_matches([':', ','])
+        .eq_ignore_ascii_case("bearer")
+    {
+        return true;
+    }
+    word.strip_suffix(':').is_some_and(|head| {
+        let head = head.trim_end_matches('"').to_ascii_lowercase();
+        SECRET_KEYS.iter().any(|key| head.ends_with(*key))
+    })
 }
 
-/// Remplace la valeur de chaque `clé=` sensible (jusqu'à `&` ou `;`) par `[masqué]`.
+/// Masque un mot entier (valeur qui suit une clé), en gardant les guillemets et la ponctuation qui l'entourent.
+fn mask_whole_value(word: &str) -> String {
+    let start = word
+        .find(|ch: char| ch != '"' && ch != '\'')
+        .unwrap_or(word.len());
+    let core = &word[start..];
+    let core_len = core.trim_end_matches(VALUE_END).len();
+    if core_len == 0 {
+        return word.to_owned();
+    }
+    format!("{}{MASK}{}", &word[..start], &core[core_len..])
+}
+
+/// Début d'une URL dans un mot : position de la partie après le schéma, et s'il s'agit d'un `magnet:`.
+struct UrlStart {
+    body_at: usize,
+    magnet: bool,
+}
+
+/// Garde le schéma et l'hôte de chaque URL (`https://hôte/[masqué]`) : chemin, requête et fragment sont masqués.
+/// Un lien `magnet:` devient `magnet:[masqué]`. Une URL sans chemin reste inchangée. Le délimiteur qui suit reste.
+fn mask_urls(word: &str) -> String {
+    let lower = word.to_ascii_lowercase();
+    let mut out = String::with_capacity(word.len());
+    let mut at = 0;
+    while let Some(url) = find_url(&lower, at) {
+        let end = word[url.body_at..]
+            .find(URL_END)
+            .map_or(word.len(), |offset| url.body_at + offset);
+        out.push_str(&word[at..url.body_at]);
+        if url.magnet {
+            out.push_str(MASK);
+        } else {
+            let host_end = word[url.body_at..end]
+                .find(['/', '?', '#'])
+                .map_or(end, |offset| url.body_at + offset);
+            // Un éventuel `utilisateur:mot_de_passe@` avant l'hôte n'est pas gardé.
+            let host = word[url.body_at..host_end]
+                .rsplit('@')
+                .next()
+                .unwrap_or_default();
+            out.push_str(host);
+            let rest = &word[host_end..end];
+            if rest.is_empty() || rest == "/" {
+                out.push_str(rest);
+            } else {
+                out.push('/');
+                out.push_str(MASK);
+            }
+        }
+        at = end;
+    }
+    out.push_str(&word[at..]);
+    out
+}
+
+/// Premier `schéma://` ou `magnet:` de `lower` (le mot en minuscules ASCII) à partir de `from`.
+fn find_url(lower: &str, from: usize) -> Option<UrlStart> {
+    let bytes = lower.as_bytes();
+    for at in from..bytes.len() {
+        if bytes[at..].starts_with(b"magnet:") && (at == from || !is_scheme_byte(bytes[at - 1])) {
+            return Some(UrlStart {
+                body_at: at + "magnet:".len(),
+                magnet: true,
+            });
+        }
+        if bytes[at..].starts_with(b"://") {
+            let mut scheme_at = at;
+            while scheme_at > from && is_scheme_byte(bytes[scheme_at - 1]) {
+                scheme_at -= 1;
+            }
+            if scheme_at < at && bytes[scheme_at].is_ascii_alphabetic() {
+                return Some(UrlStart {
+                    body_at: at + "://".len(),
+                    magnet: false,
+                });
+            }
+        }
+    }
+    None
+}
+
+fn is_scheme_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
+}
+
+/// Remplace la valeur de chaque clé sensible par `[masqué]` : `clé=valeur` (jusqu'à `&`, `;` ou un délimiteur) et
+/// `"clé":"valeur"`. Le nom peut avoir un préfixe (`refresh_token=`, `x-api-key:`), sans frontière sur `_` ou `-`.
 fn mask_key_values(word: &str) -> String {
     let lower = word.to_ascii_lowercase();
     let mut out = String::with_capacity(word.len());
     let mut at = 0;
     while at < word.len() {
-        let key = SECRET_KEYS.iter().find(|key| {
-            lower[at..].starts_with(**key)
-                && lower[at + key.len()..].starts_with('=')
-                && (at == 0 || !is_identifier_byte(lower.as_bytes()[at - 1]))
-        });
-        match key {
-            Some(key) => {
-                let value_start = at + key.len() + 1;
-                let value_end = word[value_start..]
-                    .find(['&', ';'])
-                    .map_or(word.len(), |offset| value_start + offset);
-                out.push_str(&word[at..value_start]);
-                out.push_str(MASK);
-                at = value_end;
-            }
-            None => {
-                let Some(ch) = word[at..].chars().next() else {
-                    break;
-                };
-                out.push(ch);
-                at += ch.len_utf8();
-            }
+        if let Some((value_start, value_end)) = secret_value(word, &lower, at) {
+            out.push_str(&word[at..value_start]);
+            out.push_str(MASK);
+            at = value_end;
+            continue;
         }
+        let Some(ch) = word[at..].chars().next() else {
+            break;
+        };
+        out.push(ch);
+        at += ch.len_utf8();
     }
     out
 }
 
-fn is_identifier_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
+/// Si une clé sensible se termine en `at`, suivie de `=` ou `:` (guillemet de clé JSON toléré), puis d'une valeur non
+/// vide : renvoie les bornes de cette valeur (sans son guillemet d'ouverture).
+fn secret_value(word: &str, lower: &str, at: usize) -> Option<(usize, usize)> {
+    let key = SECRET_KEYS
+        .iter()
+        .find(|key| lower[at..].starts_with(**key))?;
+    let bytes = lower.as_bytes();
+    let mut pos = at + key.len();
+    if bytes.get(pos).copied() == Some(b'"') {
+        pos += 1;
+    }
+    if !matches!(bytes.get(pos).copied(), Some(b'=') | Some(b':')) {
+        return None;
+    }
+    pos += 1;
+    if matches!(bytes.get(pos).copied(), Some(b'"') | Some(b'\'')) {
+        pos += 1;
+    }
+    let value_end = word[pos..]
+        .find(VALUE_END)
+        .map_or(word.len(), |offset| pos + offset);
+    (value_end > pos).then_some((pos, value_end))
+}
+
+/// Masque le nom du dossier utilisateur après `\Users\` ou `/Users/` (sans distinction de casse) ; le séparateur reste.
+fn mask_user_dirs(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    loop {
+        let next = USER_DIR_MARKERS
+            .iter()
+            .filter_map(|marker| {
+                lower[at..]
+                    .find(*marker)
+                    .map(|offset| at + offset + marker.len())
+            })
+            .min();
+        let Some(body_at) = next else {
+            break;
+        };
+        let end = text[body_at..]
+            .find(SEGMENT_END)
+            .map_or(text.len(), |offset| body_at + offset);
+        out.push_str(&text[at..body_at]);
+        if end > body_at {
+            out.push_str(MASK);
+        }
+        at = end;
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// Tronque à `max` caractères (et non octets), avec une marque `…`.
@@ -473,7 +644,7 @@ mod tests {
     fn scrub_masks_the_query_of_an_alldebrid_url() {
         assert_eq!(
             scrub("https://api.alldebrid.com/v4/magnet/upload?agent=laststream&apikey=SECRET123"),
-            "https://api.alldebrid.com/v4/magnet/upload?[masqué]"
+            "https://api.alldebrid.com/[masqué]"
         );
     }
 
@@ -481,8 +652,88 @@ mod tests {
     fn scrub_keeps_the_text_around_a_masked_url() {
         assert_eq!(
             scrub("Échec (https://api.alldebrid.com/v4/user?apikey=SECRET123), nouvel essai"),
-            "Échec (https://api.alldebrid.com/v4/user?[masqué]), nouvel essai"
+            "Échec (https://api.alldebrid.com/[masqué]), nouvel essai"
         );
+    }
+
+    #[test]
+    fn scrub_keeps_only_the_scheme_and_host_of_any_url() {
+        assert_eq!(
+            scrub("https://torrentio.strem.fun/realdebrid=KEY|x/stream/movie/tt1.json"),
+            "https://torrentio.strem.fun/[masqué]"
+        );
+        assert_eq!(
+            scrub("lien https://dl.alldebrid.com/dl/abc123/fichier.mkv, prêt"),
+            "lien https://dl.alldebrid.com/[masqué], prêt"
+        );
+        assert_eq!(
+            scrub("wss://relay.example.org:443/socket?key=SECRET#frag"),
+            "wss://relay.example.org:443/[masqué]"
+        );
+        assert_eq!(
+            scrub("https://user:MOTDEPASSE@files.example.org/a"),
+            "https://files.example.org/[masqué]"
+        );
+        assert_eq!(
+            scrub("magnet:?xt=urn:btih:ABC123&tr=https://tracker.example/announce?passkey=SECRET"),
+            "magnet:[masqué]"
+        );
+    }
+
+    #[test]
+    fn scrub_leaves_a_url_without_path_unchanged() {
+        assert_eq!(scrub("https://api.example.com"), "https://api.example.com");
+        assert_eq!(
+            scrub("https://api.example.com/"),
+            "https://api.example.com/"
+        );
+    }
+
+    #[test]
+    fn scrub_masks_secret_keys_used_as_a_suffix_of_a_name() {
+        assert_eq!(
+            scrub("refresh_token=SECRET1&x=1 id_token=SECRET2 auth_token=SECRET3 client_secret=SECRET4"),
+            "refresh_token=[masqué]&x=1 id_token=[masqué] auth_token=[masqué] client_secret=[masqué]"
+        );
+        assert_eq!(
+            scrub("Refresh_Token=SECRET5 MY-TOKEN=SECRET6"),
+            "Refresh_Token=[masqué] MY-TOKEN=[masqué]"
+        );
+    }
+
+    #[test]
+    fn scrub_masks_api_key_headers_with_or_without_a_space() {
+        assert_eq!(scrub("x-api-key: SECRET7 reçu"), "x-api-key: [masqué] reçu");
+        assert_eq!(scrub("X-Api-Key:SECRET8 reçu"), "X-Api-Key:[masqué] reçu");
+    }
+
+    #[test]
+    fn scrub_masks_json_token_values_written_compact_or_with_spaces() {
+        assert_eq!(
+            scrub(r#"{"token":"SECRET9","n":1}"#),
+            r#"{"token":"[masqué]","n":1}"#
+        );
+        assert_eq!(
+            scrub(r#""apikey": "SECRET10", "x": 1"#),
+            r#""apikey": "[masqué]", "x": 1"#
+        );
+    }
+
+    #[test]
+    fn scrub_keeps_names_that_only_look_like_a_secret_word() {
+        assert_eq!(
+            scrub("tokenizer=fast max_token_len=5 secrets=none"),
+            "tokenizer=fast max_token_len=5 secrets=none"
+        );
+    }
+
+    #[test]
+    fn scrub_masks_the_user_folder_name_in_windows_and_unix_paths() {
+        assert_eq!(
+            scrub(r"C:\Users\grego\AppData\Local\Laststream\shell-errors.log"),
+            r"C:\Users\[masqué]\AppData\Local\Laststream\shell-errors.log"
+        );
+        assert_eq!(scrub("c:/USERS/Greg/AppData"), "c:/USERS/[masqué]/AppData");
     }
 
     #[test]
@@ -509,6 +760,25 @@ mod tests {
     }
 
     #[test]
+    fn send_limiter_sends_an_identical_line_only_once() {
+        let mut limiter = SendLimiter::default();
+        let sent = (0..100)
+            .filter(|_| limiter.admit("panic: même ligne"))
+            .count();
+        assert_eq!(sent, 1);
+    }
+
+    #[test]
+    fn send_limiter_stops_at_fifty_distinct_lines_per_session() {
+        let mut limiter = SendLimiter::default();
+        let sent = (0..60)
+            .filter(|index| limiter.admit(&format!("erreur {index}")))
+            .count();
+        assert_eq!(sent, 50);
+        assert_eq!(SEND_CAP, 50);
+    }
+
+    #[test]
     fn early_panic_hook_journals_the_panic_with_masked_text() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
@@ -523,7 +793,7 @@ mod tests {
         });
         let journal = fs::read_to_string(&file).unwrap();
         assert!(journal.contains("panic"), "{journal}");
-        assert!(journal.contains("?[masqué]"), "{journal}");
+        assert!(journal.contains("/[masqué]"), "{journal}");
         assert!(!journal.contains("SECRET789"), "{journal}");
     }
 }

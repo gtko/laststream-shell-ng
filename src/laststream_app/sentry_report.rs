@@ -1,8 +1,13 @@
 //! Envoi des erreurs et des paniques du shell à Sentry (LAST-172).
 //!
 //! Actif seulement si un DSN est fourni : variable d'exécution `LASTSTREAM_SENTRY_DSN`, à défaut valeur de compilation
-//! (`option_env!`). Sans DSN, `init` renvoie `None` : aucun envoi, aucune erreur. Chaque événement passe par
-//! `robust::scrub` avant envoi, sans nom d'hôte ni donnée utilisateur.
+//! (`option_env!`). Sans DSN, `init` renvoie `None` : aucun envoi, aucune erreur.
+//!
+//! Le DSN est public par nature : il ne permet que d'envoyer des événements, pas d'en lire, et il peut donc figurer
+//! dans l'exécutable. Côté projet Sentry, activer le filtrage des domaines et des IP autorisés, et une limite de débit.
+//!
+//! Chaque événement passe par `scrub_event` avant envoi : textes masqués par `robust::scrub`, nom d'hôte, contexte
+//! libre (`extra`), requête HTTP et données des fils d'Ariane retirés.
 
 use std::{borrow::Cow, sync::Arc};
 
@@ -65,7 +70,12 @@ fn scrub_event(mut event: sentry::protocol::Event<'static>) -> sentry::protocol:
     }
     for crumb in &mut event.breadcrumbs.values {
         crumb.message = crumb.message.take().map(|text| scrub(&text));
+        // Défense en profondeur : les données libres des fils d'Ariane ne partent pas.
+        crumb.data.clear();
     }
+    // L'app ne remplit ni le contexte libre ni la requête HTTP : ce qui s'y trouverait n'est pas maîtrisé.
+    event.extra.clear();
+    event.request = None;
     event.server_name = None;
     event
 }
@@ -110,8 +120,31 @@ mod tests {
         let scrubbed = scrub_event(event);
         assert_eq!(
             scrubbed.message.as_deref(),
-            Some("échec https://api.alldebrid.com/v4/user?[masqué]")
+            Some("échec https://api.alldebrid.com/[masqué]")
         );
         assert!(scrubbed.server_name.is_none());
+    }
+
+    #[test]
+    fn scrub_event_drops_extra_request_and_breadcrumb_data() {
+        let mut event = sentry::protocol::Event {
+            request: Some(sentry::protocol::Request {
+                data: Some("corps de requête".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        event.extra.insert("contexte".to_owned(), "valeur".into());
+        let mut crumb = sentry::protocol::Breadcrumb::default();
+        crumb.data.insert("token".to_owned(), "SECRET11".into());
+        event.breadcrumbs.values.push(crumb);
+        let scrubbed = scrub_event(event);
+        assert!(scrubbed.extra.is_empty());
+        assert!(scrubbed.request.is_none());
+        assert!(scrubbed
+            .breadcrumbs
+            .values
+            .iter()
+            .all(|crumb| crumb.data.is_empty()));
     }
 }
