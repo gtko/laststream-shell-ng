@@ -2,8 +2,11 @@
 //! proprement, budget de relance (mpv).
 //!
 //! Journal : stderr (visible en débogage) et `%APPDATA%\Laststream\shell-errors.log` (borné), car en version finale
-//! le shell est une application fenêtrée sans console. Sentry n'est pas intégré au shell (aucune dépendance) :
-//! `report_error` est le point d'accroche unique pour le brancher.
+//! le shell est une application fenêtrée sans console.
+//!
+//! Sentry (LAST-172) : `report_error` envoie aussi chaque erreur (`sentry::capture_message`, sans effet si Sentry n'est
+//! pas initialisé). Les paniques partent par l'intégration panique de Sentry, chaînée au hook de `install_panic_hook`.
+//! Tout texte est passé par `scrub` avant écriture ou envoi : bornage à 200 caractères, requêtes d'URL et jetons masqués.
 
 use std::{
     any::Any,
@@ -15,7 +18,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, MutexGuard,
+        Mutex, MutexGuard, Once,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -26,20 +29,44 @@ const LOG_FILE: &str = "shell-errors.log";
 const LOG_MAX_BYTES: u64 = 256 * 1024;
 /// Pas d'attente des boucles qui surveillent l'arrêt.
 const POLL: Duration = Duration::from_millis(200);
+/// Longueur maximale d'un texte journalisé ou envoyé, hors marque de troncature.
+pub const MAX_REPORT_CHARS: usize = 200;
+/// Remplacement des valeurs sensibles.
+const MASK: &str = "[masqué]";
+/// Paramètres dont la valeur est masquée partout (jetons de débrideur, mots de passe), sans distinction de casse.
+const SECRET_KEYS: [&str; 6] = [
+    "access_token",
+    "apikey",
+    "api_key",
+    "password",
+    "secret",
+    "token",
+];
 
-fn log_path() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Laststream")
-        .join(LOG_FILE)
+#[cfg(not(test))]
+fn log_path() -> Option<PathBuf> {
+    Some(
+        std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Laststream")
+            .join(LOG_FILE),
+    )
+}
+
+/// En test, le journal va au fichier choisi par le test, jamais à `%APPDATA%`.
+#[cfg(test)]
+static TEST_LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+#[cfg(test)]
+fn log_path() -> Option<PathBuf> {
+    TEST_LOG_PATH.lock().ok()?.clone()
 }
 
 fn append_to_log(line: &str) {
-    if cfg!(test) {
+    let Some(path) = log_path() else {
         return;
-    }
-    let path = log_path();
+    };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -51,28 +78,129 @@ fn append_to_log(line: &str) {
     }
 }
 
-/// Journalise une erreur de production (contexte court, sans donnée de l'utilisateur).
-pub fn report_error(context: &str, error: &dyn Display) {
-    let line = format!("{context}: {error}");
+/// Écrit une ligne déjà masquée dans stderr et le journal, sans envoi.
+fn journal(line: &str) {
     eprintln!("[laststream] {line}");
-    append_to_log(&line);
+    append_to_log(line);
 }
 
-/// Journalise les paniques (lieu seulement) : en version finale elles seraient silencieuses.
+/// Journalise une erreur de production (contexte court, sans donnée de l'utilisateur) et l'envoie à Sentry si actif.
+pub fn report_error(context: &str, error: &dyn Display) {
+    let line = scrub(&format!("{context}: {error}"));
+    journal(&line);
+    sentry::capture_message(&line, sentry::Level::Error);
+}
+
+/// Installe le hook de panique (une seule fois) : la panique est journalisée avec son lieu et son message masqué,
+/// puis passe au hook précédent, qui inclut l'intégration panique de Sentry si elle est active.
 pub fn install_panic_hook() {
-    let previous = panic::take_hook();
-    panic::set_hook(Box::new(move |info| {
-        let location = info
-            .location()
-            .map(|location| format!("{}:{}", location.file(), location.line()))
-            .unwrap_or_else(|| "?".to_owned());
-        let thread = thread::current();
-        report_error(
-            "panic",
-            &format!("fil {} à {location}", thread.name().unwrap_or("sans nom")),
-        );
-        previous(info);
-    }));
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|location| format!("{}:{}", location.file(), location.line()))
+                .unwrap_or_else(|| "?".to_owned());
+            let thread = thread::current();
+            let message = panic_message(info.payload());
+            journal(&scrub(&format!(
+                "panic: fil {} à {location}: {message}",
+                thread.name().unwrap_or("sans nom")
+            )));
+            previous(info);
+        }));
+    });
+}
+
+/// Prépare un texte d'erreur ou de panique pour le journal et Sentry : jetons et requêtes d'URL masqués, borné.
+pub fn scrub(text: &str) -> String {
+    truncate_chars(&mask_secrets(text), MAX_REPORT_CHARS)
+}
+
+/// Masque les jetons de chaque mot (espaces conservés) : requête d'URL, `clé=valeur` sensible, valeur après `Bearer`.
+fn mask_secrets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut mask_next = false;
+    for piece in text.split_inclusive(char::is_whitespace) {
+        let word = piece.trim_end_matches(char::is_whitespace);
+        let spacing = &piece[word.len()..];
+        if word.is_empty() {
+            out.push_str(spacing);
+            continue;
+        }
+        if mask_next {
+            out.push_str(MASK);
+            mask_next = false;
+        } else {
+            mask_next = word
+                .trim_end_matches([':', ','])
+                .eq_ignore_ascii_case("bearer");
+            out.push_str(&mask_key_values(&mask_query(word)));
+        }
+        out.push_str(spacing);
+    }
+    out
+}
+
+/// `https://hôte/chemin?agent=…&apikey=…` devient `https://hôte/chemin?[masqué]` ; le délimiteur qui suit reste.
+fn mask_query(word: &str) -> String {
+    let Some(scheme) = word.find("://") else {
+        return word.to_owned();
+    };
+    let Some(question) = word[scheme..].find('?').map(|at| scheme + at) else {
+        return word.to_owned();
+    };
+    let tail = &word[question + 1..];
+    let end = tail
+        .find(['"', '\'', '<', '>', ')', ']', '}', ','])
+        .unwrap_or(tail.len());
+    format!("{}?{MASK}{}", &word[..question], &tail[end..])
+}
+
+/// Remplace la valeur de chaque `clé=` sensible (jusqu'à `&` ou `;`) par `[masqué]`.
+fn mask_key_values(word: &str) -> String {
+    let lower = word.to_ascii_lowercase();
+    let mut out = String::with_capacity(word.len());
+    let mut at = 0;
+    while at < word.len() {
+        let key = SECRET_KEYS.iter().find(|key| {
+            lower[at..].starts_with(**key)
+                && lower[at + key.len()..].starts_with('=')
+                && (at == 0 || !is_identifier_byte(lower.as_bytes()[at - 1]))
+        });
+        match key {
+            Some(key) => {
+                let value_start = at + key.len() + 1;
+                let value_end = word[value_start..]
+                    .find(['&', ';'])
+                    .map_or(word.len(), |offset| value_start + offset);
+                out.push_str(&word[at..value_start]);
+                out.push_str(MASK);
+                at = value_end;
+            }
+            None => {
+                let Some(ch) = word[at..].chars().next() else {
+                    break;
+                };
+                out.push(ch);
+                at += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Tronque à `max` caractères (et non octets), avec une marque `…`.
+fn truncate_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        None => text.to_owned(),
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+    }
 }
 
 /// Verrouille un mutex même empoisonné par une panique d'un autre fil : la valeur est reprise et l'incident journalisé.
@@ -339,5 +467,63 @@ mod tests {
         let from_string =
             panic::catch_unwind(|| panic!("{}", String::from("formaté"))).unwrap_err();
         assert_eq!(panic_message(from_string.as_ref()), "formaté");
+    }
+
+    #[test]
+    fn scrub_masks_the_query_of_an_alldebrid_url() {
+        assert_eq!(
+            scrub("https://api.alldebrid.com/v4/magnet/upload?agent=laststream&apikey=SECRET123"),
+            "https://api.alldebrid.com/v4/magnet/upload?[masqué]"
+        );
+    }
+
+    #[test]
+    fn scrub_keeps_the_text_around_a_masked_url() {
+        assert_eq!(
+            scrub("Échec (https://api.alldebrid.com/v4/user?apikey=SECRET123), nouvel essai"),
+            "Échec (https://api.alldebrid.com/v4/user?[masqué]), nouvel essai"
+        );
+    }
+
+    #[test]
+    fn scrub_masks_token_keys_and_bearer_values_outside_urls() {
+        assert_eq!(
+            scrub("reçu token=SECRET123&x=1 et Authorization: Bearer SECRET456 refusé"),
+            "reçu token=[masqué]&x=1 et Authorization: Bearer [masqué] refusé"
+        );
+    }
+
+    #[test]
+    fn scrub_truncates_long_text_to_about_200_characters() {
+        let scrubbed = scrub(&"é".repeat(500));
+        assert_eq!(scrubbed.chars().count(), MAX_REPORT_CHARS + 1);
+        assert!(scrubbed.ends_with('…'));
+    }
+
+    #[test]
+    fn scrub_leaves_plain_text_without_url_or_secret_unchanged() {
+        assert_eq!(
+            scrub("fil lecteur à src/x.rs:12 : pourquoi ?"),
+            "fil lecteur à src/x.rs:12 : pourquoi ?"
+        );
+    }
+
+    #[test]
+    fn early_panic_hook_journals_the_panic_with_masked_text() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("panic-hook-{}.log", std::process::id()));
+        let _ = fs::remove_file(&file);
+        *TEST_LOG_PATH.lock().unwrap() = Some(file.clone());
+        install_panic_hook();
+        let _ = panic::catch_unwind(|| {
+            panic!("échec https://api.alldebrid.com/v4/user?apikey=SECRET789")
+        });
+        let journal = fs::read_to_string(&file).unwrap();
+        assert!(journal.contains("panic"), "{journal}");
+        assert!(journal.contains("?[masqué]"), "{journal}");
+        assert!(!journal.contains("SECRET789"), "{journal}");
     }
 }
