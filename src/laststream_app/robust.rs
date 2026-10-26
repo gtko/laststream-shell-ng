@@ -337,6 +337,7 @@ fn secret_value(word: &str, lower: &str, at: usize) -> Option<(usize, usize)> {
 }
 
 /// Masque le nom du dossier utilisateur après `\Users\` ou `/Users/` (sans distinction de casse) ; le séparateur reste.
+/// Les séparateurs supplémentaires (`\\Users\\nom`, forme `{:?}` ou JSON échappée) sont sautés avant de lire le nom.
 fn mask_user_dirs(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
@@ -350,9 +351,12 @@ fn mask_user_dirs(text: &str) -> String {
                     .map(|offset| at + offset + marker.len())
             })
             .min();
-        let Some(body_at) = next else {
+        let Some(marker_end) = next else {
             break;
         };
+        let body_at = text[marker_end..]
+            .find(|c: char| c != '\\' && c != '/')
+            .map_or(text.len(), |offset| marker_end + offset);
         let end = text[body_at..]
             .find(SEGMENT_END)
             .map_or(text.len(), |offset| body_at + offset);
@@ -734,6 +738,24 @@ mod tests {
             r"C:\Users\[masqué]\AppData\Local\Laststream\shell-errors.log"
         );
         assert_eq!(scrub("c:/USERS/Greg/AppData"), "c:/USERS/[masqué]/AppData");
+    }
+
+    #[test]
+    fn scrub_masks_the_user_folder_name_in_doubled_backslash_paths() {
+        let scrubbed = scrub(r#""C:\\Users\\grego\\AppData""#);
+        assert!(
+            scrubbed.contains(r"C:\\Users\\[masqué]\\AppData"),
+            "{}",
+            scrubbed
+        );
+        assert!(!scrubbed.contains("grego"), "{}", scrubbed);
+    }
+
+    #[test]
+    fn scrub_masks_the_user_folder_name_after_repeated_separators() {
+        let scrubbed = scrub("C:/Users//grego/x");
+        assert!(!scrubbed.contains("grego"), "{}", scrubbed);
+        assert_eq!(scrubbed, "C:/Users//[masqué]/x");
     }
 
     #[test]
