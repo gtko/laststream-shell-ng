@@ -685,10 +685,7 @@ mod tests {
         let updater = Updater::new(Version::new(1, 0, 0), &endpoint, false);
         assert_eq!(updater.public_key_hex, AUTOUPDATER_PUBLIC_KEY_HEX);
         assert!(parse_public_key(&updater.public_key_hex).is_ok());
-        assert_eq!(
-            updater.allowed_hosts,
-            vec!["laststream.gtux-prog.workers.dev"]
-        );
+        assert_eq!(updater.allowed_hosts, vec!["app.laststream.app"]);
         assert!(check_url(&endpoint, "t", &updater.allowed_hosts).is_ok());
     }
 
@@ -1071,7 +1068,7 @@ mod tests {
     fn host_outside_the_list_is_refused_without_any_request() {
         let served = serve("1.0.18", &sha256_hex(INSTALLER));
         let (mut updater, dir) = updater_for(&served, "1.0.17", "host");
-        updater.allowed_hosts = vec!["laststream.gtux-prog.workers.dev".to_string()];
+        updater.allowed_hosts = vec!["app.laststream.app".to_string()];
         let error = updater.autoupdate().unwrap_err();
         assert!(error.to_string().contains("not allowed"), "{}", error);
         assert_eq!(served.hits.load(Ordering::SeqCst), 0);
@@ -1098,14 +1095,14 @@ mod tests {
 
     #[test]
     fn host_check_is_exact_and_case_insensitive() {
-        let allowed = vec!["laststream.gtux-prog.workers.dev".to_string()];
-        let ok = Url::parse("https://LastStream.gtux-prog.workers.dev/x").unwrap();
+        let allowed = vec!["app.laststream.app".to_string()];
+        let ok = Url::parse("https://App.LastStream.app/x").unwrap();
         assert!(check_url(&ok, "t", &allowed).is_ok());
         for bad in [
-            "https://evil.laststream.gtux-prog.workers.dev/x",
-            "https://laststream.gtux-prog.workers.dev.evil.test/x",
-            "https://evil.test/laststream.gtux-prog.workers.dev",
-            "https://laststream.gtux-prog.workers.dev@evil.test/x",
+            "https://evil.app.laststream.app/x",
+            "https://app.laststream.app.evil.test/x",
+            "https://evil.test/app.laststream.app",
+            "https://app.laststream.app@evil.test/x",
         ] {
             let url = Url::parse(bad).unwrap();
             assert!(check_url(&url, "t", &allowed).is_err(), "{}", bad);

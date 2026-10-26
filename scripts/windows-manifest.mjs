@@ -9,7 +9,7 @@ import { createReadStream, readFileSync, statSync, writeFileSync } from 'node:fs
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const DEFAULT_BASE_URL = 'https://laststream.gtux-prog.workers.dev/app/windows';
+export const DEFAULT_BASE_URL = 'https://app.laststream.app/app/windows';
 const INSTALLER_RE = /^Laststream-Setup-(\d+)\.(\d+)\.(\d+)\.exe$/;
 const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)$/;
 

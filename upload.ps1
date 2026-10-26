@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $bucket = 'laststream-app-files'
-$publicBase = 'https://laststream.gtux-prog.workers.dev/app/windows'
+$publicBase = 'https://app.laststream.app/app/windows'
 $manifestTool = Join-Path $PSScriptRoot 'scripts\windows-manifest.mjs'
 
 if (-not $Installer) {

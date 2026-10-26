@@ -7,10 +7,9 @@ pub const WINDOW_MIN_WIDTH: i32 = 1000;
 pub const WINDOW_MIN_HEIGHT: i32 = 600;
 pub const UPDATE_INTERVAL: u64 = 12 * 60 * 60;
 /// Version feed published by `upload.ps1` (ODY-250), checked unless `--no-autoupdater` is given.
-pub const DEFAULT_AUTOUPDATER_ENDPOINT: &str =
-    "https://laststream.gtux-prog.workers.dev/app/windows/latest.json";
+pub const DEFAULT_AUTOUPDATER_ENDPOINT: &str = "https://app.laststream.app/app/windows/latest.json";
 /// Hosts the update feed, the descriptor and the installer may be fetched from (and redirected to).
-pub const AUTOUPDATER_ALLOWED_HOSTS: &[&str] = &["laststream.gtux-prog.workers.dev"];
+pub const AUTOUPDATER_ALLOWED_HOSTS: &[&str] = &["app.laststream.app"];
 /// ed25519 public key (32 bytes, hex) that must have signed `latest.json`; the signature is the
 /// detached `latest.json.sig` (base64). The private key lives only in the release secret
 /// `LASTSTREAM_UPDATE_SIGNING_KEY` (see `scripts/sign-update.mjs`).
