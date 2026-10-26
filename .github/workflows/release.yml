@@ -20,6 +20,11 @@ on:
 permissions:
   contents: read
 
+# Une seule publication par tag a la fois ; une execution en cours n'est jamais annulee.
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
   fetch-deps:
     # contents: write : une release brouillon n'est lisible qu'avec un acces en ecriture (non verifie sur ce depot).
@@ -60,7 +65,7 @@ jobs:
           if ($actual -ne $entry.sha256) { throw "SHA-256 de $name different de deps.json : archive altérée ou restagée sans deps.json." }
         }
     - name: Upload the staged dependencies
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: release-deps
         path: deps
@@ -77,7 +82,7 @@ jobs:
     - name: disable git eol translation
       run: git config --global core.autocrlf false
     - name: checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       with:
         ref: ${{ format('refs/tags/{0}', inputs.tag) }}
         persist-credentials: false
@@ -91,15 +96,17 @@ jobs:
           exit 1
         fi
     - name: Download the staged dependencies
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
       with:
         name: release-deps
         path: deps
     - name: Stable toolchain
-      uses: actions-rust-lang/setup-rust-toolchain@v1
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       with:
         toolchain: stable
         target: x86_64-pc-windows-msvc
+        # Construction a neuf de ce qui est signe : pas de cache de toolchain.
+        cache: false
     - name: Build x64 release
       run: cargo build --release --locked --target x86_64-pc-windows-msvc
     # pwsh et non bash : Git Bash met /usr/bin/link devant le link.exe MSVC et casse l'edition de liens ARM64.
@@ -140,20 +147,21 @@ jobs:
         $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
         if (-not $iscc) {
           # Inno Setup 6 est preinstalle sur l'image windows-latest ; ce repli ne sert que si l'image change.
-          choco install innosetup --no-progress -y
+          # Version epinglee : 6.7.1, derniere 6.x disponible sur Chocolatey.
+          choco install innosetup --version 6.7.1 --no-progress -y
           $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
         }
         if (-not $iscc) { throw 'ISCC.exe introuvable (Inno Setup 6)' }
         & $iscc 'setup\Laststream.iss'
         if ($LASTEXITCODE -ne 0) { throw "ISCC a echoue (code $LASTEXITCODE)" }
     - name: Upload the installer
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: installer
         path: dist/installer/Laststream-Setup-*.exe
         if-no-files-found: error
     - name: Upload the ARM64 binary (not published)
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         name: arm64-binary
         path: target/aarch64-pc-windows-msvc/release/laststream-shell-ng.exe
@@ -173,12 +181,12 @@ jobs:
     - name: disable git eol translation
       run: git config --global core.autocrlf false
     - name: checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       with:
         ref: ${{ format('refs/tags/{0}', inputs.tag) }}
         persist-credentials: false
     - name: Download the installer
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
       with:
         name: installer
         path: release

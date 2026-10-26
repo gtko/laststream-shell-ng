@@ -25,7 +25,7 @@ jobs:
     - name: disable git eol translation
       run: git config --global core.autocrlf false
     - name: checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       with:
         fetch-depth: 0
         # Le jeton du workflow ne reste pas dans .git/config.
@@ -35,7 +35,7 @@ jobs:
     - name: Test update feed script
       run: node --test "scripts/*.test.mjs"
     - name: Stable with rustfmt and clippy
-      uses: actions-rust-lang/setup-rust-toolchain@v1
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       with:
         toolchain: stable
         target: x86_64-pc-windows-msvc
@@ -50,7 +50,7 @@ jobs:
       run: cargo test --locked --target x86_64-pc-windows-msvc
     - name: Cache cargo-audit
       id: cache-audit
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ~/.cargo/bin/cargo-audit.exe
         key: cargo-audit-${{ env.CARGO_AUDIT_VERSION }}-${{ runner.os }}
