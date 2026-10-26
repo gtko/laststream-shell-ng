@@ -788,6 +788,7 @@ fn create_mpv(window_handle: HWND) -> Result<Mpv, libmpv2::Error> {
         );
         // gpu-next: libplacebo VO with modern HDR tone-mapping; gpu, is the fallback.
         set_property!("vo", "gpu-next,gpu,");
+        let buffer = default_buffer_options();
         let mut options = vec![
             ("gpu-context", "d3d11"),
             ("d3d11-output-format", "auto"),
@@ -806,7 +807,7 @@ fn create_mpv(window_handle: HWND) -> Result<Mpv, libmpv2::Error> {
                 ("cscale", "spline36"),
             ]);
         }
-        options.extend(default_buffer_options());
+        options.extend(buffer.iter().map(|(name, value)| (*name, value.as_str())));
         for (name, value) in options {
             if let Err(error) = initializer.set_property(name, value) {
                 eprintln!("mpv: cannot set {name}={value}: {error:?}");
@@ -816,18 +817,36 @@ fn create_mpv(window_handle: HWND) -> Result<Mpv, libmpv2::Error> {
     })
 }
 
-/// Tampon mpv par défaut (niveau « large »), appliqué à l'init avant tout `loadfile`.
-/// `cache-secs` et `demuxer-readahead-secs` sont hauts : seule `demuxer-max-bytes` borne le tampon (une limite en secondes le plafonnerait pour les faibles débits).
-/// L'UI peut le surcharger ensuite via `mpv-set-prop`.
-fn default_buffer_options() -> [(&'static str, &'static str); 6] {
-    [
-        ("cache", "yes"),
-        ("cache-secs", "3600"),
-        ("demuxer-readahead-secs", "3600"),
-        ("demuxer-max-bytes", "512MiB"),
-        ("demuxer-max-back-bytes", "64MiB"),
-        ("cache-pause-wait", "5"),
+const MIB: u64 = 1024 * 1024;
+
+/// Octets lus d'avance (`demuxer-max-bytes`) : seule borne qui limite la mémoire du tampon. Valeur mesurée, voir `docs/mpv-cache.md`.
+const DEMUXER_MAX_BYTES: u64 = 120 * MIB;
+/// Octets gardés derrière la lecture (`demuxer-max-back-bytes`), pour revenir en arrière sans relire le flux.
+const DEMUXER_MAX_BACK_BYTES: u64 = 30 * MIB;
+/// Secondes de tampon (`cache-secs`, `demuxer-readahead-secs`). Elles ne limitent pas la mémoire : la borne en octets le fait.
+const CACHE_SECONDS: u64 = 3600;
+/// Plafond d'une surcharge de tampon par l'UI (1 GiB, taille du niveau « max »). La borne en octets est plafonnée à cette valeur.
+const BUFFER_CEILING_BYTES: u64 = 1024 * MIB;
+
+/// Options de tampon mpv pour une borne en octets, plafonnée à `BUFFER_CEILING_BYTES`.
+/// `cache-secs` et `demuxer-readahead-secs` restent à `CACHE_SECONDS` : seule la borne en octets limite la mémoire.
+fn buffer_options(max_bytes: u64) -> Vec<(&'static str, String)> {
+    let max_bytes = max_bytes.min(BUFFER_CEILING_BYTES);
+    let secs = CACHE_SECONDS.to_string();
+    vec![
+        ("cache", "yes".to_string()),
+        ("cache-secs", secs.clone()),
+        ("demuxer-readahead-secs", secs),
+        ("demuxer-max-bytes", max_bytes.to_string()),
+        ("demuxer-max-back-bytes", DEMUXER_MAX_BACK_BYTES.to_string()),
+        ("cache-pause-wait", "5".to_string()),
     ]
+}
+
+/// Tampon mpv par défaut, appliqué à l'init avant tout `loadfile`. Aucune surcharge par `mpv-set-prop` n'est acceptée
+/// aujourd'hui : `PropKey` ne liste pas ces propriétés (voir `docs/mpv-cache.md`, Décisions, point 2 ; suivi LAST-181).
+fn default_buffer_options() -> Vec<(&'static str, String)> {
+    buffer_options(DEMUXER_MAX_BYTES)
 }
 
 fn run_display_loop(
@@ -1345,8 +1364,8 @@ fn run_message_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        default_buffer_options, restart_player, PlayerContext, RestartStop, ResumeState,
-        VideoReadyState,
+        buffer_options, default_buffer_options, restart_player, PlayerContext, RestartStop,
+        ResumeState, VideoReadyState, BUFFER_CEILING_BYTES, CACHE_SECONDS, MIB,
     };
     use crate::laststream_app::laststream_player::communication::{BoolProp, FpProp};
     use crate::laststream_app::laststream_player::{
@@ -1531,37 +1550,71 @@ mod tests {
         assert_eq!(state.playback_restarted(), None);
     }
 
+    fn option_value<'a>(table: &'a [(&'static str, String)], name: &str) -> &'a str {
+        table
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| value.as_str())
+            .expect("buffer option is set")
+    }
+
     #[test]
-    fn default_buffer_table_is_the_large_level() {
+    fn default_buffer_table_is_the_measured_default() {
         let table = default_buffer_options();
-        assert_eq!(
-            table,
-            [
-                ("cache", "yes"),
-                ("cache-secs", "3600"),
-                ("demuxer-readahead-secs", "3600"),
-                ("demuxer-max-bytes", "512MiB"),
-                ("demuxer-max-back-bytes", "64MiB"),
-                ("cache-pause-wait", "5"),
-            ]
-        );
-        let mut names: Vec<_> = table.iter().map(|(name, _)| *name).collect();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), table.len());
+        let expected = [
+            ("cache", "yes"),
+            ("cache-secs", "3600"),
+            ("demuxer-readahead-secs", "3600"),
+            ("demuxer-max-bytes", "125829120"),
+            ("demuxer-max-back-bytes", "31457280"),
+            ("cache-pause-wait", "5"),
+        ];
+        assert_eq!(table.len(), expected.len());
+        for (name, value) in expected {
+            assert_eq!(option_value(&table, name), value, "{name}");
+        }
     }
 
     #[test]
     fn default_demuxer_max_bytes_is_a_mib_size() {
         let table = default_buffer_options();
-        let value = table
-            .iter()
-            .find(|(name, _)| *name == "demuxer-max-bytes")
-            .map(|(_, value)| *value)
-            .expect("demuxer-max-bytes is set");
-        let mib = value
-            .strip_suffix("MiB")
-            .and_then(|n| n.parse::<u64>().ok());
-        assert_eq!(mib, Some(512));
+        let bytes: u64 = option_value(&table, "demuxer-max-bytes")
+            .parse()
+            .expect("demuxer-max-bytes is a byte count");
+        assert_eq!(bytes % MIB, 0);
+        assert_eq!(bytes / MIB, 120);
+    }
+
+    #[test]
+    fn default_seconds_are_not_the_memory_limit() {
+        let table = default_buffer_options();
+        let bytes: u64 = option_value(&table, "demuxer-max-bytes").parse().unwrap();
+        let secs: u64 = option_value(&table, "demuxer-readahead-secs")
+            .parse()
+            .unwrap();
+        assert_eq!(option_value(&table, "cache-secs"), secs.to_string());
+        assert_eq!(secs, CACHE_SECONDS);
+        assert!(bytes < BUFFER_CEILING_BYTES);
+    }
+
+    #[test]
+    fn buffer_bound_is_capped_at_the_ceiling() {
+        let table = buffer_options(2 * BUFFER_CEILING_BYTES);
+        assert_eq!(
+            option_value(&table, "demuxer-max-bytes"),
+            BUFFER_CEILING_BYTES.to_string()
+        );
+        assert_eq!(option_value(&table, "cache-secs"), "3600");
+        assert_eq!(option_value(&table, "demuxer-readahead-secs"), "3600");
+    }
+
+    #[test]
+    fn buffer_bound_below_the_ceiling_is_kept() {
+        let table = buffer_options(100 * MIB);
+        assert_eq!(
+            option_value(&table, "demuxer-max-bytes"),
+            (100 * MIB).to_string()
+        );
+        assert_eq!(option_value(&table, "cache-secs"), "3600");
     }
 }
