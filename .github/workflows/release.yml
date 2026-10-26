@@ -1,7 +1,10 @@
 name: Release
 
 # Publication d'une version Windows, sur un tag v* (ex. v1.0.25) ou a la main (workflow_dispatch, avec un tag deja pousse).
-# Produit l'installeur, son SHA-256, le flux latest.json signe en ed25519 et publie les assets sur la Release GitHub.
+# Les archives des depots voisins (ui.zip, lastaddon.zip, deps.json) sont preparees en local par
+# scripts/stage-release-deps.ps1 et posees sur la release brouillon du tag. Ce workflow ne lit aucun autre depot,
+# n'a aucun jeton inter-depots et ne telecharge que les trois fichiers de la release.
+# Produit l'installeur, son SHA-256, le flux latest.json signe (ed25519) et publie la release.
 # Le televersement R2 reste manuel (upload.ps1) : aucun jeton Cloudflare dans ce workflow.
 # Pas d'Authenticode (decision produit) : l'installeur n'est pas signe de code.
 on:
@@ -15,12 +18,53 @@ on:
         required: true
         type: string
 
-# Lecture seule par defaut ; seul le job publish ecrit (creation de la Release, depot des assets).
+# Lecture seule par defaut. Les jobs qui ecrivent sont explicites ci-dessous.
 permissions:
   contents: read
 
 jobs:
+  fetch-deps:
+    # contents: write : une release brouillon n'est lisible qu'avec un acces en ecriture (non verifie sur ce depot).
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+    - name: Download the staged dependencies from the release
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        New-Item -ItemType Directory -Force deps | Out-Null
+        gh release download $env:RELEASE_TAG --dir deps --pattern ui.zip --pattern lastaddon.zip --pattern deps.json
+        foreach ($f in 'ui.zip', 'lastaddon.zip', 'deps.json') {
+          if (-not (Test-Path -LiteralPath (Join-Path deps $f))) {
+            throw "Archive $f absente de la release $env:RELEASE_TAG : lancer scripts/stage-release-deps.ps1 -Version <X.Y.Z> d'abord."
+          }
+        }
+    - name: Check the staged files against deps.json
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $deps = Get-Content -LiteralPath deps/deps.json -Raw | ConvertFrom-Json
+        if ($deps.tag -ne $env:RELEASE_TAG) { throw "deps.json vise $($deps.tag), pas $env:RELEASE_TAG : restager avec la bonne version." }
+        foreach ($name in 'ui.zip', 'lastaddon.zip') {
+          $entry = $deps.files.$name
+          $actual = (Get-FileHash -LiteralPath (Join-Path deps $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $entry.sha256) { throw "SHA-256 de $name different de deps.json : archive altérée ou restagée sans deps.json." }
+        }
+    - name: Upload the staged dependencies
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-deps
+        path: deps
+        if-no-files-found: error
+
   build:
+    needs: fetch-deps
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -43,15 +87,11 @@ jobs:
           echo "::error::Le tag $RELEASE_TAG ne correspond pas a la version $cargo_version de Cargo.toml"
           exit 1
         fi
-    # dist/laststream-desktop (UI, Node, ffmpeg, lastAddon) n'est pas dans le depot (README, section Release).
-    # Verifie avant les compilations : sans ce dossier, on echoue tout de suite.
-    - name: Check the desktop bundle is present
-      shell: bash
-      run: |
-        if [ ! -d dist/laststream-desktop ]; then
-          echo "::error::dist/laststream-desktop absent : le bundle (UI, Node, ffmpeg, lastAddon) n'est pas dans le depot. Voir README, section Release."
-          exit 1
-        fi
+    - name: Download the staged dependencies
+      uses: actions/download-artifact@v4
+      with:
+        name: release-deps
+        path: deps
     - name: Stable toolchain
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
@@ -65,10 +105,26 @@ jobs:
       run: |
         rustup target add aarch64-pc-windows-msvc
         cargo build --release --locked --target aarch64-pc-windows-msvc
-    # Le binaire x64 compile par ce job remplace laststream.exe du bundle : l'installeur livre ce qui a ete compile ici.
-    - name: Stage the x64 binary in the desktop bundle
-      shell: bash
-      run: cp target/x86_64-pc-windows-msvc/release/laststream-shell-ng.exe dist/laststream-desktop/laststream.exe
+    # dist\laststream-desktop : fichiers du depot (bin/, server.js, libmpv), archives ui/ et lastaddon/ verifiees,
+    # et le binaire x64 compile ici, qui remplace laststream.exe.
+    - name: Assemble dist/laststream-desktop
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $bundle = 'dist/laststream-desktop'
+        New-Item -ItemType Directory -Force $bundle | Out-Null
+        Copy-Item -Path 'bin/*' -Destination $bundle -Force
+        Copy-Item -LiteralPath 'server.js' -Destination $bundle -Force
+        Expand-Archive -LiteralPath 'libmpv-2_x64.zip' -DestinationPath 'dist/mpv-x64' -Force
+        $mpv = Get-ChildItem -Path 'dist/mpv-x64' -Recurse -Filter 'libmpv-2.dll' | Select-Object -First 1
+        if (-not $mpv) { throw 'libmpv-2.dll absent de libmpv-2_x64.zip' }
+        Copy-Item -LiteralPath $mpv.FullName -Destination $bundle -Force
+        Expand-Archive -LiteralPath 'deps/ui.zip' -DestinationPath $bundle -Force
+        Expand-Archive -LiteralPath 'deps/lastaddon.zip' -DestinationPath $bundle -Force
+        Copy-Item -LiteralPath 'target/x86_64-pc-windows-msvc/release/laststream-shell-ng.exe' -Destination (Join-Path $bundle 'laststream.exe') -Force
+        foreach ($f in 'README-FR.txt', 'laststream.exe', 'laststream-runtime.exe', 'ffmpeg.exe', 'libmpv-2.dll', 'server.js', 'ui/index.html', 'lastaddon/lastaddon.cjs', 'lastaddon/node.exe') {
+          if (-not (Test-Path -LiteralPath (Join-Path $bundle $f))) { throw "Bundle incomplet : $f absent de $bundle" }
+        }
     - name: Build the installer (Inno Setup 6)
       shell: pwsh
       run: |
@@ -144,18 +200,18 @@ jobs:
         $ErrorActionPreference = 'Stop'
         node scripts/sign-update.mjs release/latest.json
         if ($LASTEXITCODE -ne 0) { throw 'Signature de latest.json echouee (secret absent ou invalide)' }
-        if (-not (Test-Path release/latest.json.sig)) { throw 'latest.json.sig absent apres signature' }
-    - name: Create the Release and upload the assets
+        if (-not (Test-Path -LiteralPath release/latest.json.sig)) { throw 'latest.json.sig absent apres signature' }
+    - name: Upload the assets to the release
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $tag = $env:RELEASE_TAG
         $installer = (Get-ChildItem release -Filter 'Laststream-Setup-*.exe')[0].FullName
         $assets = @($installer, "$installer.sha256", 'release/latest.json', 'release/latest.json.sig')
-        gh release view $tag *> $null
-        if ($LASTEXITCODE -ne 0) {
-          gh release create $tag --verify-tag --title "Laststream $tag" --generate-notes
-          if ($LASTEXITCODE -ne 0) { throw "gh release create a echoue (code $LASTEXITCODE)" }
-        }
-        gh release upload $tag $assets --clobber
+        gh release upload $env:RELEASE_TAG $assets --clobber
         if ($LASTEXITCODE -ne 0) { throw "gh release upload a echoue (code $LASTEXITCODE)" }
+    - name: Publish the release (draft -> public)
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        gh release edit $env:RELEASE_TAG --draft=false
+        if ($LASTEXITCODE -ne 0) { throw "gh release edit --draft=false a echoue (code $LASTEXITCODE)" }

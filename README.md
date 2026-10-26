@@ -53,15 +53,16 @@ Signature : aucun certificat de signature de code n'est utilisé à ce jour, Sma
 
 ## Release
 
-Une version Windows se publie par tag. Le workflow `.github/workflows/release.yml` compile, construit l'installeur et publie sur GitHub ; le téléversement R2 reste manuel.
+Une version Windows se publie par tag. Le workflow `.github/workflows/release.yml` construit l'installeur et publie la release ; les dépendances des dépôts voisins (`laststream-app`, `lastaddon`) sont préparées en local par `scripts/stage-release-deps.ps1`, sans jeton inter-dépôts.
 
-1. Aligner la version dans `Cargo.toml`, `Cargo.lock` et `setup/Laststream.iss`, puis pousser sur `main`.
-2. Créer et pousser le tag, de même numéro que `Cargo.toml` : `git tag v1.0.25` puis `git push origin v1.0.25`. Le workflow refuse un tag qui ne correspond pas à la version.
-3. Le workflow compile l'exécutable x64 et la cible ARM64 (binaire seulement : `setup\Laststream.iss` ne cible que x64compatible), construit `Laststream-Setup-X.Y.Z.exe` avec Inno Setup, puis dépose sur la Release GitHub l'installeur, `Laststream-Setup-X.Y.Z.exe.sha256`, `latest.json` et `latest.json.sig` (signature ed25519, secret `LASTSTREAM_UPDATE_SIGNING_KEY`). Pour rejouer une publication : « Run workflow » avec le tag existant.
-4. Téléversement R2 à la main, depuis un poste avec `wrangler login` et `LASTSTREAM_UPDATE_SIGNING_KEY` : `.\upload.ps1 -Installer <Laststream-Setup-X.Y.Z.exe téléchargé> -Notes "…"`. Aucun jeton Cloudflare n'est dans le workflow.
+1. **Tag** : aligner la version dans `Cargo.toml`, `Cargo.lock` et `setup/Laststream.iss`, pousser sur `main`, puis `git tag v1.0.25` et `git push origin v1.0.25`. Le workflow refuse un tag qui ne correspond pas à la version.
+2. **Dépendances** (local, depuis le dépôt shell) : `.\scripts\stage-release-deps.ps1 -Version 1.0.25` (`-DryRun` pour simuler). Il exige `..\laststream-app` et `..\lastaddon` propres, sur `main` et à jour de `origin/main`, puis produit `ui.zip` (build de laststream-app), `lastaddon.zip` (`lastaddon.cjs` et `node.exe`) et `deps.json` (commits des deux dépôts, SHA-256). Il crée la release brouillon `v1.0.25` et y dépose les trois fichiers.
+3. **Workflow** : l'installeur `Laststream-Setup-X.Y.Z.exe`, son `.sha256`, `latest.json` et `latest.json.sig` (signature ed25519, secret `LASTSTREAM_UPDATE_SIGNING_KEY`) sont déposés sur la release, puis la release passe de brouillon à publiée. Le workflow vérifie les SHA-256 contre `deps.json` et échoue si les archives manquent (« lancer scripts/stage-release-deps.ps1 d'abord »). Le push du tag le lance aussi : il échoue tant que l'étape 2 n'a pas été faite ; relancer alors avec « Run workflow » et le tag.
+4. **R2** : téléversement à la main, depuis un poste avec `wrangler login` et `LASTSTREAM_UPDATE_SIGNING_KEY` : `.\upload.ps1 -Installer <Laststream-Setup-X.Y.Z.exe téléchargé> -Notes "…"`. Aucun jeton Cloudflare n'est dans le workflow.
 
 Limites connues :
-- le job d'installeur exige le dossier `dist\laststream-desktop` (UI, Node, ffmpeg, lastAddon), qui n'est pas dans le dépôt : sans lui, le workflow échoue dès la vérification du tag, avant toute compilation ;
+- `README-FR.txt` (exigé par `setup/Laststream.iss`) n'est dans aucun dépôt : le bundle est incomplet tant qu'il n'est pas fourni ;
+- `node.exe` est une copie locale (Node.js v22.23.3 win-x64) : aucun dépôt ne le fournit, son origine n'est pas tracée ; sa version et son SHA-256 figurent dans `deps.json` ;
 - pas d'Authenticode (décision produit) : SmartScreen peut alerter ;
 - `latest.json` pointe vers l'URL R2, qui ne répond qu'après l'étape 4.
 
