@@ -26,6 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(not(test))]
 const LOG_FILE: &str = "shell-errors.log";
 /// Au-delà, le journal repart de zéro.
 const LOG_MAX_BYTES: u64 = 256 * 1024;
@@ -814,8 +815,8 @@ mod tests {
             panic!("échec https://api.alldebrid.com/v4/user?apikey=SECRET789")
         });
         let journal = fs::read_to_string(&file).unwrap();
-        assert!(journal.contains("panic"), "{journal}");
-        assert!(journal.contains("/[masqué]"), "{journal}");
-        assert!(!journal.contains("SECRET789"), "{journal}");
+        assert!(journal.contains("panic"), "{}", journal);
+        assert!(journal.contains("/[masqué]"), "{}", journal);
+        assert!(!journal.contains("SECRET789"), "{}", journal);
     }
 }
