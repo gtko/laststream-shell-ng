@@ -105,6 +105,13 @@ pub struct SetBackendRequest {
     pub backend: Backend,
 }
 
+/// Charge de `player-backend` : moteur réellement actif après une demande `player-set-backend`
+/// (y compris quand la demande est refusée ou que libVLC n'a pas pu démarrer : repli sur mpv).
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+pub struct PlayerBackendAck {
+    pub backend: Backend,
+}
+
 /// Charge de `player-capabilities` : moteurs utilisables sur cette machine.
 #[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct PlayerCapabilities {
@@ -128,6 +135,7 @@ pub enum PlayerEvent {
     Error(PlayerError),
     VideoReady(PlayerVideoReady),
     Capabilities(PlayerCapabilities),
+    BackendAck(PlayerBackendAck),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -144,6 +152,13 @@ impl PlayerResponse<'_> {
         PlayerResponse(
             "player-capabilities",
             PlayerEvent::Capabilities(PlayerCapabilities::new(libvlc)),
+        )
+    }
+
+    pub fn backend(backend: Backend) -> PlayerResponse<'static> {
+        PlayerResponse(
+            "player-backend",
+            PlayerEvent::BackendAck(PlayerBackendAck { backend }),
         )
     }
 
@@ -214,6 +229,8 @@ pub enum InMsgFn {
     MpvCommand,
     MpvObserveProp,
     MpvSetGpuVideoProcessing,
+    /// Interne : `player-set-backend` passe par le même canal que `mpv-*` pour garder l'ordre des messages.
+    PlayerSetBackend,
 }
 stringable!(InMsgFn);
 // Bool
@@ -337,16 +354,25 @@ pub enum CmdVal {
     SubRemove(String),
 }
 impl CmdVal {
-    /// Chargement libVLC équivalent : URL et option `:start-time=X` (secondes) si `start=+X` est présent.
-    pub fn vlc_load(&self) -> Option<(&str, Vec<String>)> {
-        match self {
-            Self::Loadfile(url) => Some((url, Vec::new())),
-            Self::LoadfileAt(url, start) => {
-                let secs = start.strip_prefix("start=+")?.parse::<f64>().ok()?;
-                Some((url, vec![format!(":start-time={secs}")]))
-            }
-            _ => None,
+    /// Chargement libVLC équivalent : URL (http, https ou file seulement) et option `:start-time=X`
+    /// (secondes) si `start=+X` est présent ; un autre `start` est ignoré (chargement sans position).
+    /// `Err` : commande sans média ou schéma refusé, jamais d'abandon silencieux.
+    pub fn vlc_load(&self) -> Result<(&str, Vec<String>), String> {
+        let (url, start) = match self {
+            Self::Loadfile(url) => (url.as_str(), None),
+            Self::LoadfileAt(url, start) => (url.as_str(), Some(start.as_str())),
+            _ => return Err("commande sans média".into()),
+        };
+        if !is_vlc_scheme_allowed(url) {
+            return Err("schéma d'URL refusé pour libVLC (http, https, file seulement)".into());
         }
+        let options = start
+            .and_then(|start| start.strip_prefix("start=+"))
+            .and_then(|secs| secs.parse::<f64>().ok())
+            .filter(|secs| secs.is_finite() && *secs >= 0.0)
+            .map(|secs| vec![format!(":start-time={secs}")])
+            .unwrap_or_default();
+        Ok((url, options))
     }
     pub fn media_transition(&self) -> Option<bool> {
         match self {
@@ -388,6 +414,14 @@ impl TryFrom<Vec<String>> for CmdVal {
         }
     }
 }
+/// Liste blanche des schémas confiés à libVLC (qui sait ouvrir bien plus : dvd, screen, rtsp...).
+fn is_vlc_scheme_allowed(url: &str) -> bool {
+    url.split_once("://").is_some_and(|(scheme, _)| {
+        ["http", "https", "file"]
+            .iter()
+            .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+    })
+}
 fn is_safe_start_option(option: &str) -> bool {
     option
         .strip_prefix("start=+")
@@ -427,6 +461,7 @@ pub enum InMsgArgs {
     Cmd(CmdVal),
     ObProp(PropKey),
     Flag(bool),
+    Backend(Backend),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

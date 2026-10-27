@@ -26,7 +26,7 @@ use std::{
 };
 use vlc_backend::VlcBackend;
 use vlc_ffi::{LibVlc, VlcInstance};
-use vlc_player::VlcPlayer;
+use vlc_player::{VideoSurface, VlcPlayer};
 use winapi::{
     shared::windef::HWND,
     um::{
@@ -136,7 +136,12 @@ fn run() -> Result<(), String> {
     }
     // Créé AVANT la surface, comme la WebView : doit finir au-dessus.
     let overlay = child(top, SS_WHITERECT, 10, 10, 80, 40);
-    let backend = VlcBackend::new(VlcPlayer::new(player, top)?)?;
+    let surface = VideoSurface::create(top)?;
+    surface.set_visible(true);
+    let backend = VlcBackend::new(VlcPlayer::with_surface(
+        player,
+        std::sync::Arc::new(surface),
+    ))?;
     let vlc = backend.player();
     // SAFETY: GetWindow lit l'ordre Z de fenêtres vivantes.
     let below_surface = unsafe { GetWindow(vlc.surface.hwnd(), GW_HWNDNEXT) };

@@ -156,10 +156,18 @@ libvlc_api! {
     video_set_key_input = "libvlc_video_set_key_input": fn(*mut c_void, c_uint);
 }
 
-/// Vrai pour une version `3.0.x` (la ligne 3.0 est la seule dont l'ABI est déclarée ici).
+/// Correctif minimal de la ligne 3.0 accepté (celui qui est embarqué ; un VLC installé plus ancien est refusé).
+const MIN_PATCH: u32 = 21;
+
+/// Vrai pour une version `3.0.21` ou plus récente de la ligne 3.0 (la seule dont l'ABI est déclarée ici).
 pub fn is_supported_version(version: &str) -> bool {
     let mut parts = version.split(|c: char| !c.is_ascii_digit());
-    parts.next() == Some("3") && parts.next() == Some("0")
+    parts.next() == Some("3")
+        && parts.next() == Some("0")
+        && parts
+            .next()
+            .and_then(|patch| patch.parse::<u32>().ok())
+            .is_some_and(|patch| patch >= MIN_PATCH)
 }
 
 /// Dossiers candidats, par priorité : VLC embarqué, puis VLC installé.
@@ -218,15 +226,11 @@ impl LibVlc {
         }
     }
 
-    /// Charge `<dir>\libvlc.dll`. `<dir>\plugins` est annoncé à libVLC via `VLC_PLUGIN_PATH`.
+    /// Charge `<dir>\libvlc.dll` ; libvlccore trouve `plugins\` à côté de lui (pas de `VLC_PLUGIN_PATH`).
     pub fn load_from_dir(dir: &Path) -> Result<Arc<Self>, String> {
         let dll = dir.join("libvlc.dll");
         if !dll.is_file() {
             return Err(format!("{} introuvable", dll.display()));
-        }
-        let plugins = dir.join("plugins");
-        if plugins.is_dir() {
-            env::set_var("VLC_PLUGIN_PATH", &plugins);
         }
         // SAFETY: charger libvlc.dll exécute son DllMain, comme tout LoadLibrary ; le chemin est absolu
         // et l'altération du chemin de recherche ne sert qu'à trouver libvlccore.dll à côté.
@@ -239,7 +243,7 @@ impl LibVlc {
         let version = api.version();
         if !is_supported_version(&version) {
             return Err(format!(
-                "version libVLC non supportée: {version} (3.0.x requis)"
+                "version libVLC non supportée: {version} (3.0.21 ou plus récent requis)"
             ));
         }
         Ok(Arc::new(api))
@@ -574,12 +578,24 @@ mod tests {
     #[test]
     fn version_3_0_acceptee() {
         assert!(is_supported_version("3.0.21 Vetinari"));
-        assert!(is_supported_version("3.0.0"));
+        assert!(is_supported_version("3.0.22"));
+        assert!(is_supported_version("3.0.100"));
     }
 
     #[test]
     fn autres_versions_refusees() {
-        for version in ["4.0.0-dev", "3.1.0", "2.2.8", "30.0", "", "3", "abc"] {
+        for version in [
+            "4.0.0-dev",
+            "3.1.0",
+            "2.2.8",
+            "30.0",
+            "",
+            "3",
+            "abc",
+            "3.0.0",
+            "3.0.20",
+            "3.0",
+        ] {
             assert!(!is_supported_version(version), "{}", version);
         }
     }

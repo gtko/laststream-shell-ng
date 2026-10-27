@@ -5,15 +5,22 @@
 //! émet `mpv-prop-change`, `mpv-event-video-ready` et `mpv-event-ended`. mpv reste créé mais inactif
 //! (jamais de média) tant que libVLC est le moteur choisi ; le changement de moteur n'est accepté que lecteur arrêté.
 //!
+//! Ordre : `player-set-backend` voyage dans le même canal que les `mpv-*` et est traité dans l'ordre par la
+//! boucle de messages du lecteur (`PlayerEngine::route`) : un `stop` puis `player-set-backend` puis `loadfile`
+//! est vu dans cet ordre. Le fil du lecteur crée l'instance et le lecteur libVLC, demande au fil de l'interface
+//! de créer la surface (réponse attendue au plus `UI_TIMEOUT`), puis seulement active le moteur et acquitte par
+//! `player-backend` (moteur réellement actif, repli sur mpv compris).
+//!
 //! Fils : les objets Win32 (surface vidéo : création, affichage, taille) ne sont touchés que par le fil de
 //! l'interface, via `PlayerEngine::on_ui_notice` / `fit` ; les autres fils ne font que demander (atomiques + notice).
+//! Aucun appel libVLC bloquant (`stop`...) n'est fait sur le fil de l'interface.
 
 use super::{
     communication::{Backend, CmdVal, InMsg, InMsgArgs, InMsgFn, PlayerResponse, PropKey, PropVal},
     player::{ResumeState, SharedVideoReadyState},
     vlc_backend::VlcBackend,
     vlc_ffi::{LibVlc, VlcInstance, VlcState},
-    vlc_player::VlcPlayer,
+    vlc_player::{VideoSurface, VlcPlayer},
 };
 use crate::laststream_app::robust::{lock, report_error, SERVICES};
 use crate::laststream_app::RPCResponse;
@@ -31,6 +38,8 @@ use std::{
 use winapi::shared::windef::HWND;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Temps laissé au fil de l'interface pour créer la surface vidéo.
+const UI_TIMEOUT: Duration = Duration::from_secs(2);
 /// Après un chargement, une fin ou une erreur « héritée » de l'ancien média est ignorée pendant ce délai.
 const LOAD_GRACE: Duration = Duration::from_millis(1000);
 /// Lecture sans piste vidéo (audio seul) : prête dès que le temps avance de cette durée.
@@ -42,6 +51,13 @@ pub(super) struct EngineLinks {
     pub rpc_response_sender: Sender<String>,
     pub video_ready_state: SharedVideoReadyState,
     pub resume: Arc<Mutex<ResumeState>>,
+}
+
+/// Doublure des dépendances natives pour tester l'ordonnancement sans DLL.
+#[cfg(test)]
+struct Stub {
+    available: bool,
+    build: Result<(), String>,
 }
 
 #[derive(Default)]
@@ -61,8 +77,12 @@ pub struct PlayerEngine {
     active: AtomicBool,
     /// Surface vidéo demandée visible (appliquée par le fil de l'interface).
     want_visible: AtomicBool,
-    requested: Mutex<Option<Backend>>,
+    /// Demande de surface au fil de l'interface : canal de sa réponse.
+    surface_wanted: Mutex<Option<Sender<Result<(), String>>>>,
+    surface: Mutex<Option<Arc<VideoSurface>>>,
     notifier: Mutex<Option<nwg::NoticeSender>>,
+    #[cfg(test)]
+    stub: Mutex<Option<Stub>>,
     backend: Mutex<Option<Arc<VlcBackend>>>,
     session: Mutex<Session>,
 }
@@ -83,6 +103,12 @@ impl PlayerEngine {
 
     /// libVLC 3.0.x chargeable ? Le résultat (succès ou échec) est mémorisé.
     pub fn libvlc_available(&self) -> bool {
+        #[cfg(test)]
+        {
+            if let Some(stub) = lock(&self.stub, "doublure").as_ref() {
+                return stub.available;
+            }
+        }
         self.library().is_some()
     }
 
@@ -129,40 +155,86 @@ impl PlayerEngine {
         vlc_idle && mpv_idle
     }
 
-    /// `player-set-backend` (fil IPC). Refus journalisés : lecteur en cours, libVLC absente.
-    pub fn request_backend(&self, backend: Backend) {
-        if !self.is_stopped() {
-            eprintln!("player-set-backend ignoré : lecteur en cours de lecture");
-            return;
+    fn current(&self) -> Backend {
+        if self.is_active() {
+            Backend::Libvlc
+        } else {
+            Backend::Mpv
         }
-        if backend == Backend::Libvlc && !self.libvlc_available() {
-            eprintln!("player-set-backend ignoré : libVLC indisponible, mpv conservé");
-            return;
-        }
-        if self.is_active() == (backend == Backend::Libvlc) {
-            return;
-        }
-        *lock(&self.requested, "moteur demandé") = Some(backend);
-        self.notify_ui();
     }
 
-    /// Fil de l'interface : applique le changement de moteur et la visibilité de la surface.
-    pub fn on_ui_notice(self: &Arc<Self>) {
-        let requested = lock(&self.requested, "moteur demandé").take();
-        match requested {
-            Some(Backend::Libvlc) => {
-                if let Err(error) = self.activate() {
-                    report_error("lecteur: libVLC non activée, mpv conservé", &error);
+    /// Envoie `player-backend` avec le moteur actif (demande illisible : l'interface sait où on en est).
+    pub fn acknowledge_current(&self) {
+        self.send(&PlayerResponse::backend(self.current()));
+    }
+
+    /// Message `mpv-*` ou `player-set-backend` dans l'ordre d'arrivée (fil du lecteur). Renvoie le message
+    /// que mpv doit traiter ; `None` : déjà traité (libVLC actif, ou changement de moteur).
+    pub(super) fn route(
+        self: &Arc<Self>,
+        resume: &Mutex<ResumeState>,
+        message: InMsg,
+    ) -> Option<InMsg> {
+        if let InMsg(InMsgFn::PlayerSetBackend, InMsgArgs::Backend(backend)) = message {
+            self.set_backend(backend);
+            return None;
+        }
+        if self.is_active() {
+            // libVLC joue : seuls réglages et observations sont retenus, jamais le média (mpv reste inactif).
+            if !matches!(message, InMsg(InMsgFn::MpvCommand, _)) {
+                lock(resume, "reprise du lecteur").record_message(&message);
+            }
+            self.handle(message);
+            return None;
+        }
+        lock(resume, "reprise du lecteur").record_message(&message);
+        Some(message)
+    }
+
+    /// `player-set-backend`, sur le fil du lecteur, après les messages qui le précèdent. Refus journalisés :
+    /// lecteur en cours, libVLC absente ou en échec ; dans tous les cas le moteur réellement actif est acquitté.
+    fn set_backend(self: &Arc<Self>, wanted: Backend) {
+        let effective = self.switch(wanted);
+        self.send(&PlayerResponse::backend(effective));
+    }
+
+    fn switch(self: &Arc<Self>, wanted: Backend) -> Backend {
+        if wanted == self.current() {
+            return wanted;
+        }
+        if !self.is_stopped() {
+            eprintln!("player-set-backend ignoré : lecteur en cours de lecture");
+            return self.current();
+        }
+        match wanted {
+            Backend::Mpv => {
+                self.deactivate();
+                Backend::Mpv
+            }
+            Backend::Libvlc => {
+                if !self.libvlc_available() {
+                    eprintln!("player-set-backend ignoré : libVLC indisponible, mpv conservé");
+                    return Backend::Mpv;
+                }
+                match self.activate() {
+                    Ok(()) => Backend::Libvlc,
+                    Err(error) => {
+                        report_error("lecteur: libVLC non activée, mpv conservé", &error);
+                        Backend::Mpv
+                    }
                 }
             }
-            Some(Backend::Mpv) => self.deactivate(),
-            None => {}
         }
-        if let Some(backend) = lock(&self.backend, "lecteur libVLC").clone() {
-            backend
-                .player()
-                .surface
-                .set_visible(self.want_visible.load(Ordering::SeqCst) && self.is_active());
+    }
+
+    /// Fil de l'interface : crée la surface demandée par le fil du lecteur et applique sa visibilité.
+    pub fn on_ui_notice(&self) {
+        if let Some(reply) = lock(&self.surface_wanted, "surface demandée").take() {
+            let _ = reply.send(self.create_surface());
+        }
+        let visible = self.want_visible.load(Ordering::SeqCst) && self.is_active();
+        if let Some(surface) = lock(&self.surface, "surface vidéo").as_ref() {
+            surface.set_visible(visible);
         }
     }
 
@@ -171,26 +243,70 @@ impl PlayerEngine {
         if !self.want_visible.load(Ordering::SeqCst) {
             return;
         }
-        if let Some(backend) = lock(&self.backend, "lecteur libVLC").clone() {
-            backend.player().surface.fit_to_parent();
+        if let Some(surface) = lock(&self.surface, "surface vidéo").as_ref() {
+            surface.fit_to_parent();
         }
+    }
+
+    /// Fil de l'interface : crée la surface (cachée) si elle n'existe pas encore.
+    fn create_surface(&self) -> Result<(), String> {
+        let mut slot = lock(&self.surface, "surface vidéo");
+        if slot.is_none() {
+            let links = self.links.get().ok_or("moteur non attaché")?;
+            let surface = VideoSurface::create(links.parent as HWND)?;
+            surface.set_visible(false);
+            *slot = Some(Arc::new(surface));
+        }
+        Ok(())
+    }
+
+    /// Fil du lecteur : demande la surface au fil de l'interface et attend sa réponse (au plus `UI_TIMEOUT`).
+    fn ensure_surface(&self) -> Result<Arc<VideoSurface>, String> {
+        let existing = || {
+            lock(&self.surface, "surface vidéo")
+                .as_ref()
+                .map(Arc::clone)
+        };
+        if let Some(surface) = existing() {
+            return Ok(surface);
+        }
+        let (reply, answer) = flume::bounded(1);
+        *lock(&self.surface_wanted, "surface demandée") = Some(reply);
+        self.notify_ui();
+        let result = answer.recv_timeout(UI_TIMEOUT);
+        lock(&self.surface_wanted, "surface demandée").take();
+        match result {
+            Ok(Err(error)) => Err(error),
+            // Réponse tardive (surface créée juste après le délai) : elle est déjà en place.
+            _ => existing().ok_or_else(|| "surface vidéo: fil de l'interface sans réponse".into()),
+        }
+    }
+
+    /// Fil du lecteur : instance, lecteur et surface (créée par le fil de l'interface) pour libVLC.
+    fn build_backend(self: &Arc<Self>) -> Result<(), String> {
+        #[cfg(test)]
+        {
+            if let Some(stub) = lock(&self.stub, "doublure").as_ref() {
+                return stub.build.clone();
+            }
+        }
+        if lock(&self.backend, "lecteur libVLC").is_some() {
+            return Ok(());
+        }
+        let api = self.library().ok_or("libVLC indisponible")?.clone();
+        let instance = VlcInstance::new(api, VlcInstance::DEFAULT_ARGS)?;
+        let player = instance.new_player()?;
+        let surface = self.ensure_surface()?;
+        let backend = Arc::new(VlcBackend::new(VlcPlayer::with_surface(player, surface))?);
+        *lock(&self.backend, "lecteur libVLC") = Some(backend);
+        let engine = Arc::clone(self);
+        SERVICES.spawn("libvlc-poll", move || engine.poll_loop());
+        Ok(())
     }
 
     fn activate(self: &Arc<Self>) -> Result<(), String> {
         let links = self.links.get().ok_or("moteur non attaché")?;
-        let api = self.library().ok_or("libVLC indisponible")?.clone();
-        let mut slot = lock(&self.backend, "lecteur libVLC");
-        if slot.is_none() {
-            let instance = VlcInstance::new(api, VlcInstance::DEFAULT_ARGS)?;
-            let player = instance.new_player()?;
-            let vlc_player = VlcPlayer::new(player, links.parent as HWND)?;
-            let backend = Arc::new(VlcBackend::new(vlc_player)?);
-            backend.player().surface.set_visible(false);
-            *slot = Some(backend);
-            let engine = Arc::clone(self);
-            SERVICES.spawn("libvlc-poll", move || engine.poll_loop());
-        }
-        drop(slot);
+        self.build_backend()?;
         self.want_visible.store(false, Ordering::SeqCst);
         // Les réglages et observations déjà faits côté mpv (volume, props observées) passent à libVLC.
         let settings: Vec<InMsg> = lock(&links.resume, "reprise du lecteur")
@@ -205,16 +321,20 @@ impl PlayerEngine {
         Ok(())
     }
 
+    /// Fil du lecteur : libVLC est arrêtée ici (jamais sur le fil de l'interface, risque d'interblocage vout).
     fn deactivate(&self) {
         self.active.store(false, Ordering::SeqCst);
         self.want_visible.store(false, Ordering::SeqCst);
         if let Some(backend) = lock(&self.backend, "lecteur libVLC").clone() {
             backend.stop();
         }
-        let mut session = lock(&self.session, "session libVLC");
-        session.media_loaded = false;
-        session.awaiting_ready = false;
-        session.observed.clear();
+        {
+            let mut session = lock(&self.session, "session libVLC");
+            session.media_loaded = false;
+            session.awaiting_ready = false;
+            session.observed.clear();
+        }
+        self.notify_ui();
     }
 
     /// Valeur d'une propriété mpv côté libVLC (hors `VlcBackend` : `mpv-version`).
@@ -269,7 +389,7 @@ impl PlayerEngine {
                 self.notify_ui();
             }
             CmdVal::Loadfile(_) | CmdVal::LoadfileAt(_, _) => {
-                let Some((url, options)) = command.vlc_load() else {
+                let Some((url, options)) = self.parse_load(&command) else {
                     return;
                 };
                 let load_id = {
@@ -302,6 +422,18 @@ impl PlayerEngine {
             }
             // Sous-titres externes : non pris en charge par libVLC ici.
             CmdVal::SubAdd(..) | CmdVal::SubRemove(_) => {}
+        }
+    }
+
+    /// URL et options d'un chargement ; refus (schéma, commande) : journal et fin en erreur, jamais de silence.
+    fn parse_load<'a>(&self, command: &'a CmdVal) -> Option<(&'a str, Vec<String>)> {
+        match command.vlc_load() {
+            Ok(load) => Some(load),
+            Err(error) => {
+                report_error("lecteur: chargement libVLC refusé", &error);
+                self.send(&PlayerResponse::ended(mpv_end_file_reason::Error));
+                None
+            }
         }
     }
 
@@ -425,13 +557,134 @@ mod tests {
         assert_eq!(prop_value(&key, &PropVal::Str("no".into())), json!("no"));
     }
 
+    fn engine_with(
+        stub: Option<Stub>,
+    ) -> (
+        Arc<PlayerEngine>,
+        Arc<Mutex<ResumeState>>,
+        flume::Receiver<String>,
+    ) {
+        let engine = Arc::new(PlayerEngine::default());
+        let (sender, receiver) = flume::unbounded();
+        let resume = Arc::new(Mutex::new(ResumeState::default()));
+        engine.attach(EngineLinks {
+            parent: 0,
+            rpc_response_sender: sender,
+            video_ready_state: Arc::default(),
+            resume: Arc::clone(&resume),
+        });
+        *lock(&engine.stub, "test") = stub;
+        (engine, resume, receiver)
+    }
+
+    fn command(command: CmdVal) -> InMsg {
+        InMsg(InMsgFn::MpvCommand, InMsgArgs::Cmd(command))
+    }
+
+    fn set_backend(backend: Backend) -> InMsg {
+        InMsg(InMsgFn::PlayerSetBackend, InMsgArgs::Backend(backend))
+    }
+
+    fn acks(receiver: &flume::Receiver<String>) -> Vec<String> {
+        receiver
+            .try_iter()
+            .filter(|text| text.contains("player-backend"))
+            .map(|text| {
+                if text.contains("libvlc") {
+                    "libvlc"
+                } else {
+                    "mpv"
+                }
+                .to_owned()
+            })
+            .collect()
+    }
+
     #[test]
-    fn changement_de_moteur_refuse_sans_libvlc_attachee() {
-        // Sans liens ni DLL : rien n'est demandé, mpv reste le moteur.
-        let engine = PlayerEngine::default();
-        engine.request_backend(Backend::Mpv);
+    fn stop_puis_set_backend_puis_loadfile_sont_traites_dans_l_ordre() {
+        let (engine, resume, receiver) = engine_with(Some(Stub {
+            available: true,
+            build: Ok(()),
+        }));
+        let load = command(CmdVal::Loadfile("http://h/a.mp4".into()));
+        // Un premier film tourne sous mpv, puis l'interface l'arrête et demande libVLC avant de relancer.
+        assert!(engine.route(&resume, load.clone()).is_some());
+        assert!(!engine.is_stopped());
+        assert!(engine.route(&resume, command(CmdVal::Stop)).is_some());
+        assert!(engine
+            .route(&resume, set_backend(Backend::Libvlc))
+            .is_none());
+        assert!(engine.is_active());
+        // Le loadfile suivant est vu par libVLC, jamais par mpv.
+        assert!(engine.route(&resume, load.clone()).is_none());
+        assert_eq!(acks(&receiver), vec!["libvlc"]);
+        // Retour à mpv : arrêt libVLC ordonné avant le loadfile suivant, que mpv reçoit.
+        assert!(engine.route(&resume, command(CmdVal::Stop)).is_none());
+        assert!(engine.route(&resume, set_backend(Backend::Mpv)).is_none());
         assert!(!engine.is_active());
-        assert!(engine.is_stopped());
-        assert!(lock(&engine.requested, "test").is_none());
+        assert_eq!(engine.route(&resume, load.clone()), Some(load));
+        assert_eq!(acks(&receiver), vec!["mpv"]);
+    }
+
+    #[test]
+    fn set_backend_avant_l_arret_est_refuse_et_acquitte_le_moteur_reel() {
+        let (engine, resume, receiver) = engine_with(Some(Stub {
+            available: true,
+            build: Ok(()),
+        }));
+        let load = command(CmdVal::Loadfile("http://h/a.mp4".into()));
+        assert!(engine.route(&resume, load).is_some());
+        assert!(engine
+            .route(&resume, set_backend(Backend::Libvlc))
+            .is_none());
+        assert!(!engine.is_active());
+        assert_eq!(acks(&receiver), vec!["mpv"]);
+    }
+
+    #[test]
+    fn libvlc_absente_ou_en_echec_replie_sur_mpv_avec_accuse() {
+        for stub in [
+            Stub {
+                available: false,
+                build: Ok(()),
+            },
+            Stub {
+                available: true,
+                build: Err("surface vidéo: fil de l'interface sans réponse".into()),
+            },
+        ] {
+            let (engine, resume, receiver) = engine_with(Some(stub));
+            assert!(engine
+                .route(&resume, set_backend(Backend::Libvlc))
+                .is_none());
+            assert!(!engine.is_active());
+            assert_eq!(acks(&receiver), vec!["mpv"]);
+            // Le loadfile suivant reste pour mpv.
+            let load = command(CmdVal::Loadfile("http://h/a.mp4".into()));
+            assert_eq!(engine.route(&resume, load.clone()), Some(load));
+        }
+    }
+
+    #[test]
+    fn demande_de_moteur_deja_actif_est_acquittee_sans_effet() {
+        let (engine, resume, receiver) = engine_with(None);
+        assert!(engine.route(&resume, set_backend(Backend::Mpv)).is_none());
+        assert_eq!(acks(&receiver), vec!["mpv"]);
+    }
+
+    #[test]
+    fn libvlc_refuse_un_schema_inconnu_par_une_fin_en_erreur() {
+        let (engine, _resume, receiver) = engine_with(None);
+        let accepted = CmdVal::Loadfile("https://h/a.mp4".into());
+        assert!(engine.parse_load(&accepted).is_some());
+        assert!(receiver.try_recv().is_err());
+        let rejected = CmdVal::Loadfile("dvd:///D:".into());
+        assert!(engine.parse_load(&rejected).is_none());
+        let text = receiver.try_recv().expect("fin en erreur émise");
+        assert!(
+            text.contains("mpv-event-ended") && text.contains("error"),
+            "{}",
+            text
+        );
     }
 }

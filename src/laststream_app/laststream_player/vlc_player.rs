@@ -12,12 +12,12 @@
 //! `examples/vlc_probe.rs`.
 
 use super::vlc_ffi::VlcMediaPlayer;
-use std::{ffi::c_void, os::windows::ffi::OsStrExt, ptr};
+use std::{ffi::c_void, os::windows::ffi::OsStrExt, ptr, sync::Arc};
 use winapi::{
     shared::windef::{HWND, RECT},
     um::winuser::{
         CreateWindowExW, DestroyWindow, GetClientRect, SetWindowPos, ShowWindow, HWND_BOTTOM,
-        SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_VISIBLE,
+        SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
     },
 };
 
@@ -38,7 +38,7 @@ pub struct VideoSurface {
 }
 
 impl VideoSurface {
-    /// Crée la surface (visible) sur tout le rectangle client de `parent`, sous ses autres enfants.
+    /// Crée la surface (cachée : `set_visible`) sur tout le rectangle client de `parent`, sous ses autres enfants.
     pub fn create(parent: HWND) -> Result<Self, String> {
         if parent.is_null() {
             return Err("surface vidéo: HWND parent nul".into());
@@ -51,7 +51,7 @@ impl VideoSurface {
                 0,
                 class.as_ptr(),
                 title.as_ptr(),
-                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | SS_BLACKRECT,
+                WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | SS_BLACKRECT,
                 0,
                 0,
                 1,
@@ -110,6 +110,12 @@ impl VideoSurface {
     }
 }
 
+// SAFETY: les appels Win32 sur la surface (création, affichage, taille, destruction) ne se font que sur le fil
+// de l'interface, propriétaire du HWND parent ; les autres fils ne font que transporter le pointeur (le fil du
+// lecteur le passe à `set_hwnd`). Le moteur garde la surface jusqu'à la fin de l'application.
+unsafe impl Send for VideoSurface {}
+unsafe impl Sync for VideoSurface {}
+
 impl Drop for VideoSurface {
     fn drop(&mut self) {
         // SAFETY: DestroyWindow n'agit que depuis le fil propriétaire ; sinon il échoue sans effet de bord.
@@ -120,15 +126,17 @@ impl Drop for VideoSurface {
 /// Lecteur libVLC lié à sa surface. Le lecteur est libéré avant la fenêtre (ordre des champs).
 pub struct VlcPlayer {
     pub player: VlcMediaPlayer,
-    pub surface: VideoSurface,
+    /// Gardée vivante avec le lecteur (lue par la sonde `examples/vlc_probe.rs`).
+    #[allow(dead_code)]
+    pub surface: Arc<VideoSurface>,
 }
 
 impl VlcPlayer {
-    /// Crée la surface sous la WebView, désactive les entrées libVLC et branche `set_hwnd`.
-    pub fn new(player: VlcMediaPlayer, parent: HWND) -> Result<Self, String> {
-        let surface = VideoSurface::create(parent)?;
+    /// Lie le lecteur à une surface déjà créée (par le fil de l'interface) : désactive les entrées libVLC
+    /// et branche `set_hwnd`. Aucun appel Win32 ici, utilisable depuis le fil du lecteur.
+    pub fn with_surface(player: VlcMediaPlayer, surface: Arc<VideoSurface>) -> Self {
         player.disable_input();
         player.set_hwnd(surface.hwnd() as *mut c_void);
-        Ok(Self { player, surface })
+        Self { player, surface }
     }
 }

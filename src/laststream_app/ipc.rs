@@ -102,7 +102,8 @@ pub const ALLOWED_COMMANDS: &[(&str, ParamKind)] = &[
     ("mpv-command", ParamKind::Array),
     ("mpv-observe-prop", ParamKind::Str),
     ("mpv-set-gpu-video-processing", ParamKind::Bool),
-    // Choix du moteur de lecture (LAST-504) : `{backend:"mpv"|"libvlc"}`, puis `player-capabilities` en sortie.
+    // Choix du moteur de lecture (LAST-504) : `{backend:"mpv"|"libvlc"}`. Sorties : `player-capabilities` (moteurs disponibles) et `player-backend`
+    // `{backend}` (moteur réellement actif après la demande, repli sur mpv compris).
     ("player-set-backend", ParamKind::Object),
     ("player-get-capabilities", ParamKind::Unused),
 ];

@@ -649,14 +649,35 @@ impl MainWindow {
                     }
                     Some("player-get-capabilities") => player_engine.send_capabilities(),
                     Some("player-set-backend") => {
+                        // Même canal que `mpv-*` : traité dans l'ordre par le fil du lecteur, qui acquitte
+                        // par `player-backend` (moteur réellement actif).
                         match msg.get_params().and_then(|params| {
                             serde_json::from_value::<
                                 crate::laststream_app::laststream_player::communication::SetBackendRequest,
                             >(params.clone())
                             .ok()
                         }) {
-                            Some(request) => player_engine.request_backend(request.backend),
-                            None => eprintln!("player-set-backend: paramètre illisible"),
+                            Some(request) => {
+                                use crate::laststream_app::laststream_player::communication::{
+                                    InMsg, InMsgArgs, InMsgFn,
+                                };
+                                let message = InMsg(
+                                    InMsgFn::PlayerSetBackend,
+                                    InMsgArgs::Backend(request.backend),
+                                );
+                                match serde_json::to_string(&message) {
+                                    Ok(json) => {
+                                        player_tx.send(json).ok();
+                                    }
+                                    Err(error) => {
+                                        robust::report_error("player-set-backend", &error)
+                                    }
+                                }
+                            }
+                            None => {
+                                eprintln!("player-set-backend: paramètre illisible");
+                                player_engine.acknowledge_current();
+                            }
                         }
                     }
                     Some("app-error") => {

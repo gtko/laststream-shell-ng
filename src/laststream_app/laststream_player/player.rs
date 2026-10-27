@@ -445,7 +445,7 @@ pub(super) struct ResumeState {
 }
 
 impl ResumeState {
-    fn record_message(&mut self, message: &InMsg) {
+    pub(super) fn record_message(&mut self, message: &InMsg) {
         match message {
             InMsg(InMsgFn::MpvSetProp, InMsgArgs::StProp(key, value)) => {
                 match self.properties.iter_mut().find(|(known, _)| known == key) {
@@ -1372,15 +1372,10 @@ fn run_message_loop(
                 continue;
             }
         };
-        if ctx.engine.is_active() {
-            // libVLC joue : seuls réglages et observations sont retenus, jamais le média (mpv reste inactif).
-            if !matches!(in_msg, InMsg(InMsgFn::MpvCommand, _)) {
-                lock(&ctx.resume, "reprise du lecteur").record_message(&in_msg);
-            }
-            ctx.engine.handle(in_msg);
+        // `player-set-backend` et libVLC sont traités ici, dans l'ordre d'arrivée des messages.
+        let Some(in_msg) = ctx.engine.route(&ctx.resume, in_msg) else {
             continue;
-        }
-        lock(&ctx.resume, "reprise du lecteur").record_message(&in_msg);
+        };
         handle(in_msg);
     }
 

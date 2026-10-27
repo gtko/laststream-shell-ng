@@ -1,10 +1,9 @@
-//! Adaptateur libVLC vers le vocabulaire des propriétés mpv (LAST-504, non branché à l'IPC).
+//! Adaptateur libVLC vers le vocabulaire des propriétés mpv (LAST-504).
 //!
 //! `VlcBackend` expose, pour chaque propriété que l'interface observe sur mpv, la valeur JSON
 //! équivalente côté libVLC : `time-pos`, `duration` (secondes), `pause`, `volume`, `mute`, `speed`,
 //! `eof-reached`, `seeking`, `paused-for-cache`, `track-list` (`{id,type,lang,title,selected}`),
-//! `aid`, `sid`, `video-params` (`{w,h}`). Le branchement sur `communication.rs` / `app.rs`
-//! (`player-set-backend`, `player-capabilities`) est le lot suivant.
+//! `aid`, `sid`, `video-params` (`{w,h}`). Branché à l'IPC par `vlc_engine.rs`.
 //!
 //! Limites connues de libVLC 3.0 : les pistes n'ont qu'un libellé (« Piste 1 - [Français] »), pas de
 //! code de langue ISO ; `lang` reçoit le texte entre crochets s'il existe, `title` le libellé complet.
