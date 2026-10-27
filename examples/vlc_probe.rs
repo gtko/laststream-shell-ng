@@ -8,6 +8,8 @@
 //! (pixel lu à l'écran). Sans `LASTSTREAM_LIBVLC_DIR`, la recherche par défaut est utilisée.
 #![cfg(windows)]
 
+#[path = "../src/laststream_app/laststream_player/vlc_backend.rs"]
+mod vlc_backend;
 #[path = "../src/laststream_app/laststream_player/vlc_ffi.rs"]
 mod vlc_ffi;
 #[path = "../src/laststream_app/laststream_player/vlc_player.rs"]
@@ -21,6 +23,7 @@ use std::{
     ptr,
     time::{Duration, Instant},
 };
+use vlc_backend::VlcBackend;
 use vlc_ffi::{LibVlc, VlcInstance};
 use vlc_player::VlcPlayer;
 use winapi::{
@@ -132,7 +135,8 @@ fn run() -> Result<(), String> {
     }
     // Créé AVANT la surface, comme la WebView : doit finir au-dessus.
     let overlay = child(top, SS_WHITERECT, 10, 10, 80, 40);
-    let vlc = VlcPlayer::new(player, top)?;
+    let backend = VlcBackend::new(VlcPlayer::new(player, top)?)?;
+    let vlc = backend.player();
     // SAFETY: GetWindow lit l'ordre Z de fenêtres vivantes.
     let below_surface = unsafe { GetWindow(vlc.surface.hwnd(), GW_HWNDNEXT) };
     println!(
@@ -141,8 +145,7 @@ fn run() -> Result<(), String> {
     );
 
     let url = env::var("VLC_PROBE_URL").unwrap_or_else(|_| DEFAULT_URL.to_string());
-    vlc.player.set_location(&url, &[":network-caching=1000"])?;
-    vlc.player.play()?;
+    backend.load(&url, &[":network-caching=1000"])?;
 
     let mut max_time = -1;
     let mut size = None;
@@ -165,6 +168,25 @@ fn run() -> Result<(), String> {
     );
     println!("pistes audio : {:?}", vlc.player.audio_tracks());
     println!("pistes sous-titres : {:?}", vlc.player.subtitle_tracks());
+    for name in [
+        "time-pos",
+        "duration",
+        "pause",
+        "volume",
+        "mute",
+        "speed",
+        "eof-reached",
+        "seeking",
+        "paused-for-cache",
+        "track-list",
+        "aid",
+        "sid",
+        "video-params",
+    ] {
+        println!("  {name} = {:?}", backend.property(name));
+    }
+    backend.set_property("pause", &serde_json::json!(true));
+    println!("  apres pause : pause = {:?}", backend.property("pause"));
     let result = match sampled {
         Some((over, video)) => {
             println!("pixel recouvrement = {over:#08x} (blanc attendu 0xffffff) ; pixel vidéo = {video:#08x}");
@@ -176,8 +198,8 @@ fn run() -> Result<(), String> {
         }
         None => Err(format!("la lecture n'a pas avancé (temps_max={max_time})")),
     };
-    vlc.player.stop();
-    drop(vlc);
+    backend.stop();
+    drop(backend);
     // SAFETY: fenêtres de ce fil.
     unsafe {
         DestroyWindow(overlay);
