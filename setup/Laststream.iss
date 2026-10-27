@@ -7,7 +7,10 @@
 #define MyAppName "Laststream"
 #define MyAppVersion "1.0.27"
 #define MyAppExeName "laststream.exe"
-#define MyAppSourceDir SourcePath + "..\..\dist\laststream-desktop\"
+; Dossier source, sans barre finale, surchargeable (release.yml : /DMyAppSourceDir=<depot>\dist\laststream-desktop, avec /O pour la sortie).
+#ifndef MyAppSourceDir
+  #define MyAppSourceDir SourcePath + "..\..\dist\laststream-desktop"
+#endif
 #define MyAppPublisher "Laststream"
 #define public Dependency_NoExampleSetup
 #include "CodeDependencies.iss"
@@ -53,8 +56,8 @@ Name: "desktopicon"; Description: "Créer une icône sur le Bureau"; GroupDescri
 [Files]
 ; Tout le dossier portable : coque, libmpv, runtimes, server.js, lastaddon\ (dont node.exe) et ui\.
 ; Le cache WebView2 (laststream.exe.WebView2\) est exclu : il est recree par l'application.
-Source: "{#MyAppSourceDir}*"; DestDir: "{app}"; Excludes: "laststream.exe.WebView2,laststream.exe.WebView2\*"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#MyAppSourceDir}README-FR.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Excludes: "laststream.exe.WebView2,laststream.exe.WebView2\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppSourceDir}\README-FR.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
