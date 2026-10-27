@@ -116,7 +116,7 @@ jobs:
         rustup target add aarch64-pc-windows-msvc
         cargo build --release --locked --target aarch64-pc-windows-msvc
     # dist\laststream-desktop : fichiers du depot (bin/, server.js, README-FR.txt de setup/, libmpv), archives ui/ et
-    # lastaddon/ verifiees, et le binaire x64 compile ici, qui remplace laststream.exe.
+    # lastaddon/ verifiees, libVLC (vlc/, LAST-504), et le binaire x64 compile ici, qui remplace laststream.exe.
     - name: Assemble dist/laststream-desktop
       shell: pwsh
       run: |
@@ -132,8 +132,11 @@ jobs:
         Copy-Item -LiteralPath $mpv.FullName -Destination $bundle -Force
         Expand-Archive -LiteralPath 'deps/ui.zip' -DestinationPath $bundle -Force
         Expand-Archive -LiteralPath 'deps/lastaddon.zip' -DestinationPath $bundle -Force
+        # libVLC 3.0.21 (moteur secondaire) : telecharge, verifie le SHA-256 epingle, installe dans vlc\.
+        & pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-libvlc.ps1 -Destination (Join-Path $bundle 'vlc')
+        if ($LASTEXITCODE -ne 0) { throw "fetch-libvlc.ps1 a echoue (code $LASTEXITCODE)" }
         Copy-Item -LiteralPath 'target/x86_64-pc-windows-msvc/release/laststream-shell-ng.exe' -Destination (Join-Path $bundle 'laststream.exe') -Force
-        foreach ($f in 'README-FR.txt', 'laststream.exe', 'laststream-runtime.exe', 'ffmpeg.exe', 'libmpv-2.dll', 'server.js', 'ui/index.html', 'lastaddon/lastaddon.cjs', 'lastaddon/node.exe') {
+        foreach ($f in 'README-FR.txt', 'laststream.exe', 'laststream-runtime.exe', 'ffmpeg.exe', 'libmpv-2.dll', 'server.js', 'ui/index.html', 'lastaddon/lastaddon.cjs', 'lastaddon/node.exe', 'vlc/libvlc.dll', 'vlc/libvlccore.dll', 'vlc/COPYING-libvlc.txt') {
           if (-not (Test-Path -LiteralPath (Join-Path $bundle $f))) { throw "Bundle incomplet : $f absent de $bundle" }
         }
     - name: Build the installer (Inno Setup 6)
