@@ -7,3 +7,7 @@ pub use communication::{
 };
 #[cfg(test)]
 mod communication_tests;
+pub mod vlc_backend;
+pub mod vlc_engine;
+pub mod vlc_ffi;
+pub mod vlc_player;
