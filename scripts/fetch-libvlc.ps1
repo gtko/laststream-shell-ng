@@ -10,8 +10,13 @@
   1. Archive dans le cache (target\vlc-cache par defaut, ignore par git). Une archive en cache dont le SHA-256
      ne correspond pas est retelechargee. Une archive telechargee dont le SHA-256 ne correspond pas est rejetee.
   2. Extraction ciblee, sans l'arbre complet de l'archive, vers -Destination :
-       libvlc.dll, libvlccore.dll, COPYING-libvlc.txt (COPYING.txt de VLC),
-       plugins\<categorie>\*.dll pour toutes les categories sauf $ExcludedCategories.
+       libvlc.dll, libvlccore.dll,
+       COPYING-libvlc.txt (COPYING.txt de VLC, GPL v2),
+       COPYING.LGPL-2.1.txt (licenses\LGPL-2.1.txt du depot : l'archive ne contient pas le texte LGPL),
+       plugins\<categorie>\*.dll pour toutes les categories sauf $ExcludedCategories
+       et sauf les plugins $ExcludedPlugins (encodeurs, capture, disques, tuner),
+       plugins\plugins.dat regenere avec le vlc-cache-gen.exe de l'archive (evite le scan de tous les plugins
+       au premier libvlc_new ; vlc-cache-gen.exe lui-meme n'est pas livre).
   3. Un -Destination non vide qui ne contient pas COPYING-libvlc.txt n'est jamais ecrase. Un -Destination
      issu d'une execution precedente de ce script est remplace.
 
@@ -44,8 +49,24 @@ $ZipName = "vlc-$Version-win64.zip"
 $Url = "https://get.videolan.org/vlc/$Version/win64/$ZipName"
 $Sha256Pinned = 'a0b7ec02b50adf6417eed014fb8df50af39690505a4225b85b3dc2ed17d14843'
 $LicenseName = 'COPYING-libvlc.txt'
+$LgplName = 'COPYING.LGPL-2.1.txt'
 # Categories de plugins (dossiers plugins\<categorie>\ de l'archive) non livrees : hors lecture reseau.
-$ExcludedCategories = @('gui', 'lua', 'control', 'services_discovery', 'stream_out', 'visualization', 'video_splitter', 'keystore')
+# mux et access_output ne servent qu'a la sortie de flux (stream_out, deja exclue).
+$ExcludedCategories = @('gui', 'lua', 'control', 'services_discovery', 'stream_out', 'visualization', 'video_splitter', 'keystore', 'mux', 'access_output')
+# Plugins exclus dans les categories livrees : "categorie\motif" (joker -like sur le nom du fichier).
+$ExcludedPlugins = @(
+    'codec\libx264*', 'codec\libx26410b*', 'codec\libx265*', 'codec\libtwolame*', 'codec\libshine*',
+    'access\libdshow*', 'access\libscreen*', 'access\libdtv*', 'access\libdvdnav*', 'access\libdvdread*',
+    'access\liblibbluray*', 'access\libbluray*'
+)
+
+function Test-ExcludedPlugin([string]$Category, [string]$File) {
+    foreach ($pattern in $ExcludedPlugins) {
+        $pair = $pattern.Split('\', 2)
+        if ($pair[0] -eq $Category -and $File -like $pair[1]) { return $true }
+    }
+    return $false
+}
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not $Destination) { $Destination = Join-Path $repoRoot 'dist\laststream-desktop\vlc' }
@@ -107,6 +128,8 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $prefix = "vlc-$Version/"
 $selected = New-Object System.Collections.Generic.List[object]
+$cacheGenDir = Join-Path $CacheDir 'cache-gen'
+$cacheGenExe = Join-Path $cacheGenDir 'vlc-cache-gen.exe'
 $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
 try {
     foreach ($entry in $zip.Entries) {
@@ -117,7 +140,7 @@ try {
             $target = $rel
         } elseif ($rel -eq 'COPYING.txt') {
             $target = $LicenseName
-        } elseif ($parts.Count -eq 3 -and $parts[0] -eq 'plugins' -and $parts[2].EndsWith('.dll', [StringComparison]::OrdinalIgnoreCase) -and ($ExcludedCategories -notcontains $parts[1])) {
+        } elseif ($parts.Count -eq 3 -and $parts[0] -eq 'plugins' -and $parts[2].EndsWith('.dll', [StringComparison]::OrdinalIgnoreCase) -and ($ExcludedCategories -notcontains $parts[1]) -and -not (Test-ExcludedPlugin $parts[1] $parts[2])) {
             $target = $rel.Replace('/', '\')
         } else {
             continue
@@ -128,20 +151,45 @@ try {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $item.Path) | Out-Null
         [IO.Compression.ZipFileExtensions]::ExtractToFile($item.Entry, $item.Path, $true)
     }
+    # vlc-cache-gen.exe n'est pas livre : il sert ici a produire plugins\plugins.dat (dossier temporaire du cache).
+    $cacheGenEntry = $zip.GetEntry($prefix + 'vlc-cache-gen.exe')
+    if ($cacheGenEntry) {
+        if (Test-Path -LiteralPath $cacheGenDir) { Remove-Item -LiteralPath $cacheGenDir -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $cacheGenDir | Out-Null
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($cacheGenEntry, $cacheGenExe, $true)
+        foreach ($dll in 'libvlc.dll', 'libvlccore.dll') { Copy-Item -LiteralPath (Join-Path $Destination $dll) -Destination $cacheGenDir }
+    }
 } finally {
     $zip.Dispose()
 }
 
-foreach ($required in 'libvlc.dll', 'libvlccore.dll', $LicenseName) {
+# Texte LGPL 2.1 : celui du depot (l'archive VLC ne contient que la GPL). Le COPYING de l'archive reste livre.
+$lgplSource = Join-Path $repoRoot 'licenses\LGPL-2.1.txt'
+if (-not (Test-Path -LiteralPath $lgplSource -PathType Leaf)) { throw "Texte LGPL absent du depot : $lgplSource" }
+Copy-Item -LiteralPath $lgplSource -Destination (Join-Path $Destination $LgplName)
+
+foreach ($required in 'libvlc.dll', 'libvlccore.dll', $LicenseName, $LgplName) {
     if (-not (Test-Path -LiteralPath (Join-Path $Destination $required) -PathType Leaf)) {
         throw "Fichier attendu absent de l'archive : $required"
     }
 }
-$plugins = @(Get-ChildItem -LiteralPath (Join-Path $Destination 'plugins') -Recurse -Filter '*.dll' -ErrorAction SilentlyContinue)
+$pluginsDir = Join-Path $Destination 'plugins'
+$plugins = @(Get-ChildItem -LiteralPath $pluginsDir -Recurse -Filter '*.dll' -ErrorAction SilentlyContinue)
 if ($plugins.Count -eq 0) { throw 'Aucun plugin copie : filtre de categories a verifier.' }
+
+# Cache des plugins : evite le scan de tous les plugins au premier libvlc_new (un echec n'est pas bloquant).
+if (Test-Path -LiteralPath $cacheGenExe -PathType Leaf) {
+    & $cacheGenExe $pluginsDir | Out-Null
+    if (-not (Test-Path -LiteralPath (Join-Path $pluginsDir 'plugins.dat') -PathType Leaf)) {
+        Write-Warning 'plugins.dat non genere : libVLC scannera les plugins au premier lancement.'
+    }
+} else {
+    Write-Warning 'vlc-cache-gen.exe absent de l archive : plugins.dat non genere.'
+}
 
 # 4. Bilan.
 $files = @(Get-ChildItem -LiteralPath $Destination -Recurse -File)
 $bytes = ($files | Measure-Object -Property Length -Sum).Sum
 Write-Host ("libVLC {0} : {1} fichiers, {2:N1} Mo dont {3} plugins, dans {4}" -f $Version, $files.Count, ($bytes / 1MB), $plugins.Count, $Destination)
 Write-Host ("Categories de plugins exclues : {0}" -f ($ExcludedCategories -join ', '))
+Write-Host ("Plugins exclus : {0}" -f ($ExcludedPlugins -join ', '))

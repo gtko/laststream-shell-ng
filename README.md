@@ -39,12 +39,12 @@ fonts. Subtitles with separate font URLs stay in the WebUI libass renderer.
 
 ## libVLC (moteur secondaire)
 
-La coque embarque libVLC 3.0.21 (VideoLAN) dans le sous-dossier `vlc\` de l'installeur : `libvlc.dll`, `libvlccore.dll`, `plugins\` et `COPYING-libvlc.txt`. Les catégories de plugins `gui`, `lua`, `control`, `services_discovery`, `stream_out`, `visualization`, `video_splitter` et `keystore` ne sont pas livrées.
+La coque embarque libVLC 3.0.21 (VideoLAN) dans le sous-dossier `vlc` de l'installeur : `libvlc.dll`, `libvlccore.dll`, `plugins` (avec `plugins.dat`), `COPYING-libvlc.txt` et `COPYING.LGPL-2.1.txt`. Les catégories de plugins `gui`, `lua`, `control`, `services_discovery`, `stream_out`, `visualization`, `video_splitter`, `keystore`, `mux` et `access_output` ne sont pas livrées, ni les encodeurs (x264, x265, twolame, shine) ni les accès dshow, screen, dtv, dvdnav, dvdread et bluray.
 
 - **Origine** : archive officielle `vlc-3.0.21-win64.zip` (https://get.videolan.org/vlc/3.0.21/win64/). `scripts/fetch-libvlc.ps1` la télécharge, vérifie son SHA-256 épinglé, puis copie la sélection dans `dist\laststream-desktop\vlc`. L'archive est mise en cache dans `target\vlc-cache`.
 - **Appel** : `build.ps1` le lance avant ISCC ; `release.yml` le lance pendant l'assemblage du bundle. `test.yml` n'en a pas besoin.
-- **Licence** : libVLC est distribué sous LGPL 2.1 ou ultérieure. `COPYING-libvlc.txt` reprend le fichier COPYING de l'archive (texte GPL v2) ; les plugins peuvent avoir leurs propres licences.
-- **Sources** : https://download.videolan.org/vlc/3.0.21/
+- **Licence** : le cœur libVLC (`libvlc.dll`) et `libvlccore.dll` sont sous LGPL 2.1 ou ultérieure ; certains plugins de la build Windows sont sous GPL v2 ou ultérieure. `COPYING-libvlc.txt` est le fichier COPYING de l'archive (texte GPL v2) et `COPYING.LGPL-2.1.txt` le texte de la LGPL 2.1 (`licenses/LGPL-2.1.txt`, copié par `fetch-libvlc.ps1` : l'archive VLC ne contient pas ce texte). Les plugins peuvent avoir leurs propres licences.
+- **Sources** : https://download.videolan.org/vlc/3.0.21/ (code source correspondant de libVLC et des plugins livrés)
 - Les DLL et le cache ne sont jamais commités (`.gitignore`).
 
 ## Publier une version Windows
