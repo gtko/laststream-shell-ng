@@ -5,6 +5,10 @@
 //! puis envoyée tout en bas de l'ordre Z des enfants (`HWND_BOTTOM`) : la WebView reste donc
 //! visible et cliquable par-dessus quel que soit l'ordre de création.
 //!
+//! Pas de `WS_CLIPSIBLINGS` sur la surface : la WebView2 (transparente) couvre tout le rectangle
+//! client et se trouve au-dessus ; avec ce style, la région visible de la surface (et de la fenêtre
+//! de sortie vidéo de libVLC, son enfant) serait vide, et on ne verrait que le fond blanc du parent.
+//!
 //! La surface doit être créée, redimensionnée et détruite sur le fil qui possède le HWND parent
 //! (le fil de l'interface, qui pompe les messages).
 //!
@@ -17,7 +21,7 @@ use winapi::{
     shared::windef::{HWND, RECT},
     um::winuser::{
         CreateWindowExW, DestroyWindow, GetClientRect, SetWindowPos, ShowWindow, HWND_BOTTOM,
-        SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+        SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA, WS_CHILD, WS_CLIPCHILDREN,
     },
 };
 
@@ -51,7 +55,7 @@ impl VideoSurface {
                 0,
                 class.as_ptr(),
                 title.as_ptr(),
-                WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | SS_BLACKRECT,
+                WS_CHILD | WS_CLIPCHILDREN | SS_BLACKRECT,
                 0,
                 0,
                 1,
