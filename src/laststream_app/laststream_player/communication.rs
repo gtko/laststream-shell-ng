@@ -32,6 +32,10 @@ impl PlayerProprChange {
             }
         }
     }
+    /// Changement de propriété dont la valeur est déjà du JSON (moteur libVLC).
+    pub fn from_json(name: String, data: serde_json::Value) -> Self {
+        Self { name, data }
+    }
     pub fn from_name_value(name: String, value: PropertyData) -> Self {
         let is_json = JSON_RESPONSES.contains(&name.as_str());
         Self {
@@ -88,6 +92,34 @@ pub struct PlayerVideoReady {
     pub load_id: u64,
     pub ready: bool,
 }
+/// Moteur de lecture choisi par l'interface (`player-set-backend`).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    Mpv,
+    Libvlc,
+}
+/// Paramètre de `player-set-backend`.
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+pub struct SetBackendRequest {
+    pub backend: Backend,
+}
+
+/// Charge de `player-capabilities` : moteurs utilisables sur cette machine.
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+pub struct PlayerCapabilities {
+    pub backends: Vec<Backend>,
+}
+impl PlayerCapabilities {
+    pub fn new(libvlc: bool) -> Self {
+        let mut backends = vec![Backend::Mpv];
+        if libvlc {
+            backends.push(Backend::Libvlc);
+        }
+        Self { backends }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum PlayerEvent {
@@ -95,6 +127,7 @@ pub enum PlayerEvent {
     End(PlayerEnded),
     Error(PlayerError),
     VideoReady(PlayerVideoReady),
+    Capabilities(PlayerCapabilities),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -104,6 +137,27 @@ impl PlayerResponse<'_> {
         PlayerResponse(
             "mpv-event-video-ready",
             PlayerEvent::VideoReady(PlayerVideoReady { load_id, ready }),
+        )
+    }
+
+    pub fn capabilities(libvlc: bool) -> PlayerResponse<'static> {
+        PlayerResponse(
+            "player-capabilities",
+            PlayerEvent::Capabilities(PlayerCapabilities::new(libvlc)),
+        )
+    }
+
+    pub fn prop_change(name: &str, data: serde_json::Value) -> PlayerResponse<'static> {
+        PlayerResponse(
+            "mpv-prop-change",
+            PlayerEvent::PropChange(PlayerProprChange::from_json(name.to_string(), data)),
+        )
+    }
+
+    pub fn ended(reason: EndFileReason) -> PlayerResponse<'static> {
+        PlayerResponse(
+            "mpv-event-ended",
+            PlayerEvent::End(PlayerEnded::from_end_reason(reason)),
         )
     }
 
@@ -283,6 +337,17 @@ pub enum CmdVal {
     SubRemove(String),
 }
 impl CmdVal {
+    /// Chargement libVLC équivalent : URL et option `:start-time=X` (secondes) si `start=+X` est présent.
+    pub fn vlc_load(&self) -> Option<(&str, Vec<String>)> {
+        match self {
+            Self::Loadfile(url) => Some((url, Vec::new())),
+            Self::LoadfileAt(url, start) => {
+                let secs = start.strip_prefix("start=+")?.parse::<f64>().ok()?;
+                Some((url, vec![format!(":start-time={secs}")]))
+            }
+            _ => None,
+        }
+    }
     pub fn media_transition(&self) -> Option<bool> {
         match self {
             Self::Stop => Some(false),

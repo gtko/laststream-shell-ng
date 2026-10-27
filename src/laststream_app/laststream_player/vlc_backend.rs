@@ -8,7 +8,6 @@
 //!
 //! Limites connues de libVLC 3.0 : les pistes n'ont qu'un libellé (« Piste 1 - [Français] »), pas de
 //! code de langue ISO ; `lang` reçoit le texte entre crochets s'il existe, `title` le libellé complet.
-#![allow(dead_code)] // Branché par le lot suivant.
 
 use super::{
     vlc_ffi::{

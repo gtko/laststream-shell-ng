@@ -42,6 +42,7 @@ use winapi::um::{
     },
 };
 
+use crate::laststream_app::laststream_player::vlc_engine::{EngineLinks, PlayerEngine};
 use crate::laststream_app::laststream_player::{
     CmdVal, InMsg, InMsgArgs, InMsgFn, PlayerEnded, PlayerEvent, PlayerProprChange, PlayerResponse,
     PropKey, PropVal,
@@ -276,7 +277,7 @@ fn subtitle_worker(mpv: &mut Mpv, request_receiver: Receiver<SubtitleWorkerReque
 }
 
 #[derive(Debug, Default)]
-struct VideoReadyState {
+pub(super) struct VideoReadyState {
     next_load_id: u64,
     current_load_id: Option<u64>,
     pending_load_ids: VecDeque<u64>,
@@ -286,7 +287,7 @@ struct VideoReadyState {
 }
 
 impl VideoReadyState {
-    fn begin_transition(&mut self, loads_file: bool) -> u64 {
+    pub(super) fn begin_transition(&mut self, loads_file: bool) -> u64 {
         self.next_load_id += 1;
         self.current_load_id = Some(self.next_load_id);
         self.file_loaded_id = None;
@@ -307,18 +308,18 @@ impl VideoReadyState {
         self.ready_sent_id = None;
     }
 
-    fn start_file(&mut self) {
+    pub(super) fn start_file(&mut self) {
         self.active_load_id = self.pending_load_ids.pop_front();
         self.file_loaded_id = None;
     }
 
-    fn file_loaded(&mut self) {
+    pub(super) fn file_loaded(&mut self) {
         if self.active_load_id == self.current_load_id {
             self.file_loaded_id = self.active_load_id;
         }
     }
 
-    fn playback_restarted(&mut self) -> Option<u64> {
+    pub(super) fn playback_restarted(&mut self) -> Option<u64> {
         let load_id = self.current_load_id?;
         if self.file_loaded_id != Some(load_id) || self.ready_sent_id == Some(load_id) {
             return None;
@@ -328,7 +329,7 @@ impl VideoReadyState {
     }
 }
 
-type SharedVideoReadyState = Arc<Mutex<VideoReadyState>>;
+pub(super) type SharedVideoReadyState = Arc<Mutex<VideoReadyState>>;
 
 fn video_ready_response(load_id: u64, ready: bool) -> String {
     RPCResponse::response_message(PlayerResponse::video_ready(load_id, ready).to_value())
@@ -410,6 +411,8 @@ pub struct Player {
     pub channel: ipc::Channel,
     /// Reçoit un signal quand le budget de relance de mpv est épuisé (le shell l'annonce à l'utilisateur).
     pub lost: Option<Receiver<()>>,
+    /// Moteur libVLC optionnel (LAST-504), partagé avec l'IPC et le fil de l'interface.
+    pub engine: Arc<PlayerEngine>,
 }
 
 /// Pourquoi mpv ne repart pas : budget épuisé (le lecteur est perdu) ou fermeture de l'app (rien à signaler).
@@ -434,7 +437,7 @@ const THREAD_POLL: Duration = Duration::from_millis(100);
 
 /// Ce qu'il faut rejouer sur un mpv relancé : réglages, propriétés observées, média en cours et sa position.
 #[derive(Debug, Default)]
-struct ResumeState {
+pub(super) struct ResumeState {
     properties: Vec<(PropKey, PropVal)>,
     observed: Vec<PropKey>,
     load: Option<CmdVal>,
@@ -467,6 +470,11 @@ impl ResumeState {
         }
     }
 
+    /// Un média est chargé (ou à reprendre après une relance de mpv).
+    pub(super) fn has_media(&self) -> bool {
+        self.load.is_some()
+    }
+
     /// Plus de média à reprendre (arrêt demandé, ou fin de fichier).
     fn clear_media(&mut self) {
         self.load = None;
@@ -494,7 +502,7 @@ impl ResumeState {
     }
 
     /// Messages à traiter avant tout autre sur un mpv relancé : réglages, observations, puis rechargement du média.
-    fn replay_messages(&self) -> Vec<InMsg> {
+    pub(super) fn replay_messages(&self) -> Vec<InMsg> {
         let mut messages: Vec<InMsg> = self
             .properties
             .iter()
@@ -530,6 +538,7 @@ struct PlayerContext {
     died: Sender<String>,
     /// Le superviseur y signale l'épuisement du budget de relance (voir `Player::lost`).
     lost: Sender<()>,
+    engine: Arc<PlayerEngine>,
 }
 
 fn signal_death(ctx: &PlayerContext, stop: &AtomicBool, cause: &str) {
@@ -753,7 +762,14 @@ impl PartialUi for Player {
             resume: Arc::new(Mutex::new(ResumeState::default())),
             died: died_sender,
             lost: lost_sender,
+            engine: Arc::clone(&data.engine),
         };
+        data.engine.attach(EngineLinks {
+            parent: window_handle as isize,
+            rpc_response_sender: ctx.rpc_response_sender.clone(),
+            video_ready_state: Arc::clone(&ctx.video_ready_state),
+            resume: Arc::clone(&ctx.resume),
+        });
         let first = Generation::start(&ctx, Vec::new()).map_err(nwg::NwgError::initialization)?;
         SERVICES.spawn("mpv-supervisor", move || {
             supervise_player(ctx, first, died_receiver)
@@ -1356,6 +1372,14 @@ fn run_message_loop(
                 continue;
             }
         };
+        if ctx.engine.is_active() {
+            // libVLC joue : seuls réglages et observations sont retenus, jamais le média (mpv reste inactif).
+            if !matches!(in_msg, InMsg(InMsgFn::MpvCommand, _)) {
+                lock(&ctx.resume, "reprise du lecteur").record_message(&in_msg);
+            }
+            ctx.engine.handle(in_msg);
+            continue;
+        }
         lock(&ctx.resume, "reprise du lecteur").record_message(&in_msg);
         handle(in_msg);
     }
@@ -1397,6 +1421,7 @@ mod tests {
             resume: Arc::new(Mutex::new(ResumeState::default())),
             died: flume::unbounded::<String>().0,
             lost: flume::unbounded::<()>().0,
+            engine: Arc::default(),
         };
         // Budget nul : aucune relance possible, donc aucune instance de mpv n'est démarrée.
         let mut policy = RestartPolicy::new(0, Duration::from_secs(60), Duration::from_millis(1));

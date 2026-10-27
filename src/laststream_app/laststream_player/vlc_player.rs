@@ -10,7 +10,6 @@
 //!
 //! Ce module n'utilise que `std`, `winapi` et `super::vlc_ffi` : il est inclus tel quel par
 //! `examples/vlc_probe.rs`.
-#![allow(dead_code)] // Branché par le lot suivant (IPC player-set-backend).
 
 use super::vlc_ffi::VlcMediaPlayer;
 use std::{ffi::c_void, os::windows::ffi::OsStrExt, ptr};

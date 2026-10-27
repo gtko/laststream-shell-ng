@@ -1,6 +1,6 @@
 use crate::laststream_app::laststream_player::communication::{
-    BoolProp, CmdVal, FpProp, InMsg, InMsgArgs, InMsgFn, IntProp, PlayerEnded, PlayerProprChange,
-    PlayerResponse, PropKey, PropVal,
+    Backend, BoolProp, CmdVal, FpProp, InMsg, InMsgArgs, InMsgFn, IntProp, PlayerEnded,
+    PlayerProprChange, PlayerResponse, PropKey, PropVal, SetBackendRequest,
 };
 use libmpv2::{events::PropertyData, mpv_end_file_reason};
 
@@ -377,4 +377,72 @@ fn subtitle_commands_require_deferred_selection_and_explicit_ids() {
         .media_transition(),
         None
     );
+}
+
+#[test]
+fn set_backend_request_parses_both_engines() {
+    for (text, expected) in [("mpv", Backend::Mpv), ("libvlc", Backend::Libvlc)] {
+        let parsed: SetBackendRequest =
+            serde_json::from_value(serde_json::json!({ "backend": text })).unwrap();
+        assert_eq!(parsed.backend, expected);
+    }
+}
+
+#[test]
+fn set_backend_request_rejects_unknown_engine() {
+    assert!(serde_json::from_value::<SetBackendRequest>(
+        serde_json::json!({ "backend": "gstreamer" })
+    )
+    .is_err());
+    assert!(serde_json::from_value::<SetBackendRequest>(serde_json::json!({})).is_err());
+}
+
+#[test]
+fn capabilities_response_lists_available_backends() {
+    assert_eq!(
+        PlayerResponse::capabilities(false).to_value(),
+        Some(serde_json::json!(["player-capabilities", { "backends": ["mpv"] }]))
+    );
+    assert_eq!(
+        PlayerResponse::capabilities(true).to_value(),
+        Some(serde_json::json!([
+            "player-capabilities",
+            { "backends": ["mpv", "libvlc"] }
+        ]))
+    );
+}
+
+#[test]
+fn vlc_load_maps_loadfile_start_to_start_time_option() {
+    let plain = CmdVal::Loadfile("http://x/v.mp4".to_string());
+    assert_eq!(plain.vlc_load(), Some(("http://x/v.mp4", vec![])));
+    let at = CmdVal::LoadfileAt("http://x/v.mp4".to_string(), "start=+12.5".to_string());
+    assert_eq!(
+        at.vlc_load(),
+        Some(("http://x/v.mp4", vec![":start-time=12.5".to_string()]))
+    );
+    assert_eq!(CmdVal::Stop.vlc_load(), None);
+    assert_eq!(CmdVal::SubRemove("2".to_string()).vlc_load(), None);
+}
+
+#[test]
+fn libvlc_prop_change_and_ended_use_the_mpv_wire_format() {
+    assert_eq!(
+        PlayerResponse::prop_change("time-pos", serde_json::json!(1.5)).to_value(),
+        Some(serde_json::json!(["mpv-prop-change", { "name": "time-pos", "data": 1.5 }]))
+    );
+    assert_eq!(
+        PlayerResponse::ended(mpv_end_file_reason::Eof).to_value(),
+        Some(serde_json::json!(["mpv-event-ended", { "reason": "eof" }]))
+    );
+}
+
+#[test]
+fn unsupported_properties_still_deserialize_so_libvlc_can_ignore_them() {
+    let parsed: InMsg = serde_json::from_value(serde_json::json!([
+        "mpv-set-prop",
+        ["video-margin-ratio-left", 0.1]
+    ]))
+    .unwrap();
+    assert!(matches!(parsed.0, InMsgFn::MpvSetProp));
 }

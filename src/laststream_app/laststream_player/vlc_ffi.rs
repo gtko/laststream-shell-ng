@@ -10,7 +10,8 @@
 //!
 //! Ce module n'utilise que `std`, `libloading`, `winreg` : il est inclus tel quel par
 //! `examples/vlc_probe.rs`.
-#![allow(dead_code)] // Branché par le lot suivant (IPC player-set-backend).
+
+#![allow(dead_code)] // Surface FFI complète, partagée avec examples/vlc_probe.rs : tout n'est pas utilisé par l'app.
 
 use libloading::Library;
 use std::{

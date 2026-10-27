@@ -7,6 +7,7 @@
 //! Contrôle aussi l'ordre Z : une fenêtre blanche créée AVANT la surface doit rester visible au-dessus
 //! (pixel lu à l'écran). Sans `LASTSTREAM_LIBVLC_DIR`, la recherche par défaut est utilisée.
 #![cfg(windows)]
+#![allow(dead_code)] // Modules partagés avec l'app : seule une partie sert à la sonde.
 
 #[path = "../src/laststream_app/laststream_player/vlc_backend.rs"]
 mod vlc_backend;

@@ -102,6 +102,9 @@ pub const ALLOWED_COMMANDS: &[(&str, ParamKind)] = &[
     ("mpv-command", ParamKind::Array),
     ("mpv-observe-prop", ParamKind::Str),
     ("mpv-set-gpu-video-processing", ParamKind::Bool),
+    // Choix du moteur de lecture (LAST-504) : `{backend:"mpv"|"libvlc"}`, puis `player-capabilities` en sortie.
+    ("player-set-backend", ParamKind::Object),
+    ("player-get-capabilities", ParamKind::Unused),
 ];
 
 /// Vérifie qu'une méthode est dans la liste blanche et que son paramètre a la forme attendue.
@@ -149,7 +152,8 @@ pub struct RPCResponse {
 }
 
 impl RPCResponse {
-    pub fn get_handshake(streaming_server_url: Option<&str>) -> String {
+    /// `player_backends` : tableau JSON des moteurs de lecture utilisables (`["mpv"]` ou `["mpv","libvlc"]`).
+    pub fn get_handshake(streaming_server_url: Option<&str>, player_backends: &str) -> String {
         let resp = RPCResponse {
             id: 0,
             object: "transport".to_string(),
@@ -199,6 +203,12 @@ impl RPCResponse {
                             "downloadStore".to_string(),
                             "".to_string(),
                             "true".to_string(),
+                        ],
+                        vec![
+                            "".to_string(),
+                            "playerBackends".to_string(),
+                            "".to_string(),
+                            player_backends.to_string(),
                         ],
                     ],
                     signals: vec![],
@@ -348,12 +358,17 @@ mod tests {
     #[test]
     fn handshake_announces_the_download_store() {
         let wire: serde_json::Value =
-            serde_json::from_str(&RPCResponse::get_handshake(None)).unwrap();
+            serde_json::from_str(&RPCResponse::get_handshake(None, "[\"mpv\"]")).unwrap();
         let properties = wire["data"]["transport"]["properties"].as_array().unwrap();
         let announced = properties
             .iter()
             .find(|entry| entry[1] == "downloadStore")
             .map(|entry| entry[3].clone());
         assert_eq!(announced, Some(json!("true")));
+        let backends = properties
+            .iter()
+            .find(|entry| entry[1] == "playerBackends")
+            .map(|entry| entry[3].clone());
+        assert_eq!(backends, Some(json!("[\"mpv\"]")));
     }
 }

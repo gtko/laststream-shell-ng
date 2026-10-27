@@ -150,6 +150,10 @@ pub struct MainWindow {
     #[nwg_control]
     #[nwg_events(OnNotice: [Self::on_player_lost_notice])]
     pub player_lost_notice: nwg::Notice,
+    /// Moteur libVLC : création/affichage de la surface vidéo sur le fil de l'interface (LAST-504).
+    #[nwg_control]
+    #[nwg_events(OnNotice: [Self::on_player_engine_notice])]
+    pub player_engine_notice: nwg::Notice,
     /// Result of the last probe of the remote service (`None` while it runs); the error holds the cause.
     pub remote_probe_result: Arc<Mutex<Option<Result<(), String>>>>,
     /// Page of the remote service to load, from `shell.json` (`None`: local service or explicit URL).
@@ -254,6 +258,8 @@ impl MainWindow {
         };
         let player_tx = player_tx.clone();
         let player_rx = player_rx.clone();
+        let player_engine = self.player.engine.clone();
+        player_engine.set_notifier(self.player_engine_notice.sender());
         // Le lecteur signale l'épuisement de son budget de relance : l'interface l'annonce (LAST-172).
         if let Some(lost_receiver) = self.player.lost.clone() {
             let lost_sender = self.player_lost_notice.sender();
@@ -430,7 +436,10 @@ impl MainWindow {
                     // The handshake. Here we send some useful data to the WEB UI
                     None if msg.is_handshake() => {
                         web_tx_web
-                            .send(RPCResponse::get_handshake(local_server_url.as_deref()))
+                            .send(RPCResponse::get_handshake(
+                                local_server_url.as_deref(),
+                                &player_engine.backends_json(),
+                            ))
                             .ok();
                     }
                     // Téléchargements (ODY-201). Le sélecteur de dossier tourne sur le fil de l'interface ; les autres
@@ -635,6 +644,20 @@ impl MainWindow {
                         }
 
                         open_sender_web.send(OpenRequest::Ready).ok();
+                        // Toujours après la réponse `init` : le bus de l'app n'existe qu'ensuite.
+                        player_engine.send_capabilities();
+                    }
+                    Some("player-get-capabilities") => player_engine.send_capabilities(),
+                    Some("player-set-backend") => {
+                        match msg.get_params().and_then(|params| {
+                            serde_json::from_value::<
+                                crate::laststream_app::laststream_player::communication::SetBackendRequest,
+                            >(params.clone())
+                            .ok()
+                        }) {
+                            Some(request) => player_engine.request_backend(request.backend),
+                            None => eprintln!("player-set-backend: paramètre illisible"),
+                        }
                     }
                     Some("app-error") => {
                         hide_splash_sender.notice();
@@ -912,6 +935,10 @@ impl MainWindow {
         if !self.splash_screen.visible() {
             self.webview.fit_to_window(self.window.handle.hwnd());
         }
+        self.player.engine.fit();
+    }
+    fn on_player_engine_notice(&self) {
+        self.player.engine.on_ui_notice();
     }
     fn on_window_state_changed(&self) {
         self.save_window_settings();
