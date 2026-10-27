@@ -54,7 +54,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Créer une icône sur le Bureau"; GroupDescription: "Raccourcis :"; Flags: unchecked
 
 [Files]
-; Tout le dossier portable : coque, libmpv, runtimes, server.js, lastaddon\ (dont node.exe) et ui\.
+; Tout le dossier portable : coque, libmpv, runtimes, server.js, lastaddon\ (dont node.exe), ui\ et vlc\ (libVLC).
 ; Le cache WebView2 (laststream.exe.WebView2\) est exclu : il est recree par l'application.
 Source: "{#MyAppSourceDir}\*"; DestDir: "{app}"; Excludes: "laststream.exe.WebView2,laststream.exe.WebView2\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#MyAppSourceDir}\README-FR.txt"; DestDir: "{app}"; Flags: ignoreversion
@@ -65,6 +65,10 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Lancer {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; libVLC peut ecrire des fichiers (cache de plugins) dans vlc\ au premier lancement : l'installeur ne les suit pas.
+Type: filesandordirs; Name: "{app}\vlc"
 
 [Code]
 function InitializeSetup: Boolean;

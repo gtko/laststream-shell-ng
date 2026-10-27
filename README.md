@@ -37,6 +37,16 @@ changing the user's selection.
 mpv handles fonts embedded in the media or subtitle file and installed system
 fonts. Subtitles with separate font URLs stay in the WebUI libass renderer.
 
+## libVLC (moteur secondaire)
+
+La coque embarque libVLC 3.0.21 (VideoLAN) dans le sous-dossier `vlc\` de l'installeur : `libvlc.dll`, `libvlccore.dll`, `plugins\` et `COPYING-libvlc.txt`. Les catégories de plugins `gui`, `lua`, `control`, `services_discovery`, `stream_out`, `visualization`, `video_splitter` et `keystore` ne sont pas livrées.
+
+- **Origine** : archive officielle `vlc-3.0.21-win64.zip` (https://get.videolan.org/vlc/3.0.21/win64/). `scripts/fetch-libvlc.ps1` la télécharge, vérifie son SHA-256 épinglé, puis copie la sélection dans `dist\laststream-desktop\vlc`. L'archive est mise en cache dans `target\vlc-cache`.
+- **Appel** : `build.ps1` le lance avant ISCC ; `release.yml` le lance pendant l'assemblage du bundle. `test.yml` n'en a pas besoin.
+- **Licence** : libVLC est distribué sous LGPL 2.1 ou ultérieure. `COPYING-libvlc.txt` reprend le fichier COPYING de l'archive (texte GPL v2) ; les plugins peuvent avoir leurs propres licences.
+- **Sources** : https://download.videolan.org/vlc/3.0.21/
+- Les DLL et le cache ne sont jamais commités (`.gitignore`).
+
 ## Publier une version Windows
 
 L'installeur se construit en local (le dossier `dist\laststream-desktop` contient l'UI, Node, ffmpeg et lastAddon, qui ne sont pas dans ce dépôt) puis se publie en une commande.
