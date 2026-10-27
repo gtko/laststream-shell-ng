@@ -173,23 +173,23 @@ impl VlcBackend {
     pub fn set_property(&self, name: &str, value: &Value) -> bool {
         let p = &self.player.player;
         match name {
-            "pause" => value.as_bool().map_or(false, |pause| {
+            "pause" => value.as_bool().is_some_and(|pause| {
                 self.pause_requested.store(pause, Ordering::Relaxed);
                 p.set_pause(pause);
                 true
             }),
-            "time-pos" => value.as_f64().map_or(false, |secs| {
+            "time-pos" => value.as_f64().is_some_and(|secs| {
                 self.seek_to(secs);
                 true
             }),
             "volume" => value
                 .as_f64()
-                .map_or(false, |volume| p.set_volume(volume.round() as i32)),
-            "mute" => value.as_bool().map_or(false, |mute| {
+                .is_some_and(|volume| p.set_volume(volume.round() as i32)),
+            "mute" => value.as_bool().is_some_and(|mute| {
                 p.set_mute(mute);
                 true
             }),
-            "speed" => value.as_f64().map_or(false, |speed| {
+            "speed" => value.as_f64().is_some_and(|speed| {
                 let applied = p.set_rate(speed as f32);
                 if applied {
                     if let Ok(mut current) = self.speed.lock() {
@@ -219,7 +219,7 @@ impl VlcBackend {
             .lock()
             .ok()
             .and_then(|last| *last)
-            .map_or(false, |at| at.elapsed() < SEEK_WINDOW);
+            .is_some_and(|at| at.elapsed() < SEEK_WINDOW);
         recent || self.player.player.state() == VlcState::Opening
     }
 
