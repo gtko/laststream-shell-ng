@@ -152,7 +152,9 @@ jobs:
           $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
         }
         if (-not $iscc) { throw 'ISCC.exe introuvable (Inno Setup 6)' }
-        & $iscc 'setup\Laststream.iss'
+        # Le .iss vise par defaut le dist\ du workspace local (..\..\dist) : en CI, le bundle et la sortie sont dans le depot.
+        $root = (Get-Location).Path
+        & $iscc "/DMyAppSourceDir=$root\dist\laststream-desktop" "/O$root\dist\installer" 'setup\Laststream.iss'
         if ($LASTEXITCODE -ne 0) { throw "ISCC a echoue (code $LASTEXITCODE)" }
     - name: Upload the installer
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
