@@ -774,6 +774,8 @@ fn init_options(unified_memory: bool) -> Vec<(&'static str, &'static str)> {
         ("dither-depth", "auto"),
         // `network-timeout` vaut 60 s par défaut dans mpv ; 30 s borne plus tôt une connexion figée (LAST-187).
         ("network-timeout", "30"),
+        // mpv force RTSP sur TCP par défaut, que la Freebox refuse (461) ; `lavf` essaie UDP puis TCP (LAST-505).
+        ("rtsp-transport", "lavf"),
     ];
     if unified_memory {
         options.push(("profile", "fast"));
@@ -1642,6 +1644,17 @@ mod tests {
                     .count(),
                 1,
                 "unified_memory={}: network-timeout listed once",
+                unified_memory
+            );
+        }
+    }
+
+    #[test]
+    fn init_options_let_ffmpeg_pick_the_rtsp_transport() {
+        for unified_memory in [false, true] {
+            assert!(
+                init_options(unified_memory).contains(&("rtsp-transport", "lavf")),
+                "unified_memory={}: rtsp-transport=lavf absent",
                 unified_memory
             );
         }
