@@ -5,7 +5,7 @@
 ; les donnees utilisateur (%APPDATA%\Laststream) : aucune entree [UninstallDelete] ne les vise.
 
 #define MyAppName "Laststream"
-#define MyAppVersion "1.0.31"
+#define MyAppVersion "1.0.32"
 #define MyAppExeName "laststream.exe"
 ; Dossier source, sans barre finale, surchargeable (release.yml : /DMyAppSourceDir=<depot>\dist\laststream-desktop, avec /O pour la sortie).
 #ifndef MyAppSourceDir
